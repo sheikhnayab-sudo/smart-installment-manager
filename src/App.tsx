@@ -9,7 +9,11 @@ import {
   signInWithPopup, 
   GoogleAuthProvider, 
   signOut, 
-  User as FirebaseUser 
+  User as FirebaseUser,
+  RecaptchaVerifier,
+  signInWithPhoneNumber,
+  linkWithPopup,
+  ConfirmationResult
 } from "firebase/auth";
 import { 
   collection, 
@@ -61,6 +65,7 @@ import { format, addMonths, isBefore, isAfter, subDays, startOfDay, differenceIn
 
 import { auth, db, storage } from "./firebase";
 import { cn } from "./lib/utils";
+import { translations, Language } from "./translations";
 
 const toDate = (date: any): Date => {
   try {
@@ -101,6 +106,7 @@ interface Customer {
   cnic: string;
   address: string;
   cnicPhotoUrl?: string;
+  photoUrl?: string;
   guarantor1: Guarantor;
   guarantor2: Guarantor;
   salespersonId?: string;
@@ -139,6 +145,7 @@ interface Salesperson {
   id: string;
   name: string;
   phone: string;
+  photoUrl?: string;
   userId: string;
   createdAt: any;
   isDeleted?: boolean;
@@ -164,6 +171,7 @@ interface BusinessProfile {
   address: string;
   tagline?: string;
   logoUrl?: string;
+  ownerPhotoUrl?: string;
   updatedAt?: any;
 }
 
@@ -250,25 +258,42 @@ interface FirestoreErrorInfo {
   }
 }
 
-function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
-  const errorMessage = error instanceof Error ? error.message : String(error);
+function handleFirestoreError(error: any, operationType: OperationType, path: string | null) {
+  // 1. Get a safe string representation of the error without triggering circular toString()
+  let errorMessage = "Unknown error";
+  
+  if (error) {
+    if (typeof error === 'string') {
+      errorMessage = error;
+    } else if (error instanceof Error) {
+      errorMessage = error.message;
+    } else if (typeof error === 'object') {
+      // Safely extract message or code if they exist
+      if (error.message) errorMessage = String(error.message);
+      else if (error.code) errorMessage = `Error code: ${error.code}`;
+      else errorMessage = "Complex error object";
+    } else {
+      errorMessage = String(error);
+    }
+  }
+
   console.error(`Firestore Error [${operationType}] at ${path}:`, errorMessage);
   
-  // Create a safe object with only primitives to avoid circular structure errors
+  // 2. Construct a safe, flat object for serialization
   const errInfo = {
-    error: String(errorMessage),
+    error: String(errorMessage).substring(0, 1000),
     operationType: String(operationType),
     path: path ? String(path) : null,
-    userId: auth.currentUser?.uid ? String(auth.currentUser.uid) : null
+    userId: auth.currentUser?.uid || null
   };
   
-  let stringifiedInfo = errorMessage;
+  // 3. Safely stringify
+  let stringifiedInfo: string;
   try {
     stringifiedInfo = JSON.stringify(errInfo);
   } catch (e) {
-    console.error("Failed to stringify error info", e);
-    // Ultimate fallback with manual string construction for safety
-    stringifiedInfo = `{"error": ${JSON.stringify(errorMessage)}, "operationType": "${operationType}", "path": ${JSON.stringify(path)}, "serializationError": true}`;
+    // Ultimate fallback if JSON.stringify fails
+    stringifiedInfo = `{"error": "Serialization failed", "operationType": "${operationType}", "path": "${path}"}`;
   }
   
   throw new Error(stringifiedInfo);
@@ -276,7 +301,7 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
 
 // --- Components ---
 
-function DeleteConfirmModal({ title, message, onConfirm, onCancel }: { title: string; message: string; onConfirm: () => void; onCancel: () => void }) {
+function DeleteConfirmModal({ title, message, onConfirm, onCancel, t }: { title: string; message: string; onConfirm: () => void; onCancel: () => void; t: any }) {
   const [loading, setLoading] = useState(false);
 
   const handleConfirm = async () => {
@@ -309,14 +334,14 @@ function DeleteConfirmModal({ title, message, onConfirm, onCancel }: { title: st
             onClick={onCancel}
             disabled={loading}
           >
-            Cancel
+            {t.cancel}
           </Button>
           <Button 
             className="flex-1 bg-rose-600 hover:bg-rose-700 text-white" 
             onClick={handleConfirm}
             disabled={loading}
           >
-            {loading ? "Deleting..." : "Delete"}
+            {loading ? t.deleting : t.delete}
           </Button>
         </div>
       </motion.div>
@@ -324,7 +349,7 @@ function DeleteConfirmModal({ title, message, onConfirm, onCancel }: { title: st
   );
 }
 
-function ProfileSetup({ user, onComplete, onLogout }: { user: FirebaseUser; onComplete: () => void; onLogout: () => void }) {
+function ProfileSetup({ user, onComplete, onLogout, t }: { user: FirebaseUser; onComplete: () => void; onLogout: () => void; t: any }) {
   const [formData, setFormData] = useState<BusinessProfile>({
     businessName: "",
     ownerName: user.displayName || "",
@@ -379,8 +404,8 @@ function ProfileSetup({ user, onComplete, onLogout }: { user: FirebaseUser; onCo
           <div className="w-16 h-16 bg-indigo-50 rounded-2xl flex items-center justify-center mx-auto mb-4">
             <Store className="w-8 h-8 text-indigo-600" />
           </div>
-          <h2 className="text-2xl font-bold text-gray-900">Setup Your Business</h2>
-          <p className="text-gray-600">Please provide your business details to get started.</p>
+          <h2 className="text-2xl font-bold text-gray-900">{t.setupBusiness}</h2>
+          <p className="text-gray-600">{t.setupBusinessDesc}</p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -391,29 +416,29 @@ function ProfileSetup({ user, onComplete, onLogout }: { user: FirebaseUser; onCo
             </div>
           )}
           <div className="space-y-1">
-            <label className="text-xs font-bold text-gray-500 uppercase">Business Name</label>
+            <label className="text-xs font-bold text-gray-500 uppercase">{t.businessName}</label>
             <Input 
               required 
-              placeholder="e.g. Madni Electronics" 
+              placeholder={t.businessNamePlaceholder} 
               value={formData.businessName}
               onChange={e => setFormData({...formData, businessName: e.target.value})}
             />
           </div>
           <div className="space-y-1">
-            <label className="text-xs font-bold text-gray-500 uppercase">Owner Name</label>
+            <label className="text-xs font-bold text-gray-500 uppercase">{t.ownerName}</label>
             <Input 
               required 
-              placeholder="Your Name" 
+              placeholder={t.fullNamePlaceholder} 
               value={formData.ownerName}
               onChange={e => setFormData({...formData, ownerName: e.target.value})}
             />
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="space-y-1">
-              <label className="text-xs font-bold text-gray-500 uppercase">Contact Phone</label>
+              <label className="text-xs font-bold text-gray-500 uppercase">{t.contactPhone}</label>
               <Input 
                 required 
-                placeholder="03xx-xxxxxxx" 
+                placeholder={t.phonePlaceholder} 
                 value={formData.phone}
                 onChange={e => {
                   let val = e.target.value;
@@ -423,26 +448,26 @@ function ProfileSetup({ user, onComplete, onLogout }: { user: FirebaseUser; onCo
               />
             </div>
             <div className="space-y-1">
-              <label className="text-xs font-bold text-gray-500 uppercase">Business Tagline (Optional)</label>
+              <label className="text-xs font-bold text-gray-500 uppercase">{t.taglineOptional}</label>
               <Input 
-                placeholder="e.g. Quality Electronics on Easy Installments" 
+                placeholder={t.taglinePlaceholder} 
                 value={formData.tagline}
                 onChange={e => setFormData({...formData, tagline: e.target.value})}
               />
             </div>
           </div>
           <div className="space-y-1">
-            <label className="text-xs font-bold text-gray-500 uppercase">Business Address</label>
+            <label className="text-xs font-bold text-gray-500 uppercase">{t.businessAddress}</label>
             <Input 
               required 
-              placeholder="Full Shop/Office Address" 
+              placeholder={t.addressPlaceholder} 
               value={formData.address}
               onChange={e => setFormData({...formData, address: e.target.value})}
             />
           </div>
           
           <Button type="submit" className="w-full py-6 text-lg" disabled={loading}>
-            {loading ? "Saving..." : "Complete Setup"}
+            {loading ? t.saving : t.completeSetup}
           </Button>
 
           <p className="text-center text-xs text-slate-400 mt-4">
@@ -509,6 +534,148 @@ const Card = ({ children, className, onClick }: { children: React.ReactNode; cla
   </div>
 );
 
+const Login = ({ onLogin, error, t, lang, setLang }: { onLogin: () => void; error: string | null; t: any; lang: Language; setLang: (l: Language) => void }) => {
+  const [phone, setPhone] = useState("");
+  const [otp, setOtp] = useState("");
+  const [step, setStep] = useState<'phone' | 'otp'>('phone');
+  const [confirmationResult, setConfirmationResult] = useState<ConfirmationResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  const setupRecaptcha = () => {
+    if (!(window as any).recaptchaVerifier) {
+      (window as any).recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
+        'size': 'invisible'
+      });
+    }
+  };
+
+  const handlePhoneLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (phone.startsWith("+972")) {
+      return setLocalError("Phone login is not available for this region.");
+    }
+    setLoading(true);
+    setLocalError(null);
+    try {
+      setupRecaptcha();
+      const verifier = (window as any).recaptchaVerifier;
+      const result = await signInWithPhoneNumber(auth, phone, verifier);
+      setConfirmationResult(result);
+      setStep('otp');
+    } catch (err: any) {
+      console.error("Phone login failed", err);
+      setLocalError(err.message || "Failed to send OTP.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleVerifyOTP = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!confirmationResult) return;
+    setLoading(true);
+    setLocalError(null);
+    try {
+      await confirmationResult.confirm(otp);
+    } catch (err: any) {
+      console.error("OTP verification failed", err);
+      setLocalError("Invalid OTP. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="h-full flex flex-col items-center justify-center bg-gray-50 p-4">
+      <div className="absolute top-4 right-4 flex gap-2">
+        <select 
+          value={lang} 
+          onChange={(e) => setLang(e.target.value as Language)}
+          className="bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-sm font-medium shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+        >
+          <option value="en">English</option>
+          <option value="ur">اردو</option>
+          <option value="ar">العربية</option>
+          <option value="fa">فارسی</option>
+          <option value="hi">हिन्दी</option>
+          <option value="ps">پښتو</option>
+        </select>
+      </div>
+
+      <Card className="max-w-md w-full p-8 text-center">
+        <div className="mb-6 flex justify-center">
+          <div className="w-16 h-16 bg-indigo-50 rounded-2xl flex items-center justify-center">
+            <CreditCard className="w-8 h-8 text-indigo-600" />
+          </div>
+        </div>
+        <h1 className="text-2xl font-bold text-gray-900 mb-2">{t.appName}</h1>
+        <p className="text-gray-600 mb-8">{t.loginDesc}</p>
+        
+        {(error || localError) && (
+          <div className="mb-6 p-4 bg-rose-50 border border-rose-100 text-rose-600 rounded-xl text-sm flex items-center gap-3 text-left">
+            <AlertCircle className="w-5 h-5 flex-shrink-0" />
+            <p>{error || localError}</p>
+          </div>
+        )}
+
+        <div className="space-y-4">
+          {step === 'phone' ? (
+            <form onSubmit={handlePhoneLogin} className="space-y-4">
+              <div className="text-left">
+                <label className="block text-xs font-medium text-gray-500 mb-1 uppercase tracking-wider">{t.enterPhone}</label>
+                <Input 
+                  type="tel" 
+                  placeholder={t.phonePlaceholder} 
+                  value={phone} 
+                  onChange={(e) => setPhone(e.target.value)}
+                  required
+                />
+              </div>
+              <Button type="submit" className="w-full py-6" disabled={loading}>
+                {loading ? t.saving : t.sendOTP}
+              </Button>
+              <div className="relative my-6">
+                <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-gray-200"></div></div>
+                <div className="relative flex justify-center text-xs uppercase"><span className="bg-white px-2 text-gray-400">{t.or}</span></div>
+              </div>
+              <Button onClick={(e) => { e.preventDefault(); onLogin(); }} variant="outline" className="w-full py-6 flex items-center justify-center gap-2">
+                <img src="https://www.google.com/favicon.ico" className="w-4 h-4" alt="" />
+                {t.loginWithGoogle}
+              </Button>
+            </form>
+          ) : (
+            <form onSubmit={handleVerifyOTP} className="space-y-4">
+              <div className="text-left">
+                <label className="block text-xs font-medium text-gray-500 mb-1 uppercase tracking-wider">{t.enterOTP}</label>
+                <Input 
+                  type="text" 
+                  placeholder="123456" 
+                  value={otp} 
+                  onChange={(e) => setOtp(e.target.value)}
+                  required
+                />
+              </div>
+              <Button type="submit" className="w-full py-6" disabled={loading}>
+                {loading ? t.saving : t.verifyOTP}
+              </Button>
+              <Button onClick={() => setStep('phone')} variant="ghost" className="w-full">
+                {t.cancel}
+              </Button>
+            </form>
+          )}
+        </div>
+        
+        <div id="recaptcha-container"></div>
+
+        <p className="mt-6 text-xs text-gray-400">
+          {t.termsPrivacy}
+        </p>
+      </Card>
+    </div>
+  );
+};
+
 // --- Main App ---
 
 export default function App() {
@@ -517,11 +684,50 @@ export default function App() {
   const [profileLoading, setProfileLoading] = useState(true);
   const [initError, setInitError] = useState<string | null>(null);
   const [isOnline, setIsOnline] = useState(typeof navigator !== 'undefined' ? navigator.onLine : true);
+  const [lang, setLang] = useState<Language>(() => {
+    const saved = localStorage.getItem('app_lang');
+    return (saved as Language) || 'en';
+  });
+  const t = translations[lang];
+
+  useEffect(() => {
+    localStorage.setItem('app_lang', lang);
+    // Handle RTL
+    if (['ur', 'ar', 'fa', 'ps'].includes(lang)) {
+      document.documentElement.dir = 'rtl';
+    } else {
+      document.documentElement.dir = 'ltr';
+    }
+  }, [lang]);
+
   const [activeTab, setActiveTab] = useState<"dashboard" | "customers" | "installments" | "settings" | "reminders" | "salespeople" | "trash">("dashboard");
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [installments, setInstallments] = useState<Installment[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
   const [salespeople, setSalespeople] = useState<Salesperson[]>([]);
+  const [showBackupPrompt, setShowBackupPrompt] = useState(false);
+
+  useEffect(() => {
+    if (user && user.phoneNumber && !user.email) {
+      const dismissed = localStorage.getItem('backup_prompt_dismissed');
+      if (!dismissed) {
+        setShowBackupPrompt(true);
+      }
+    } else {
+      setShowBackupPrompt(false);
+    }
+  }, [user]);
+
+  const handleLinkGmail = async () => {
+    const provider = new GoogleAuthProvider();
+    try {
+      await linkWithPopup(user!, provider);
+      setShowBackupPrompt(false);
+    } catch (error: any) {
+      console.error("Linking failed", error);
+      alert("Failed to link Gmail: " + error.message);
+    }
+  };
 
   const activeCustomers = useMemo(() => customers.filter(c => !c.isDeleted), [customers]);
   const activeInstallments = useMemo(() => {
@@ -765,31 +971,13 @@ export default function App() {
 
   if (!user) {
     return (
-      <div className="h-full flex items-center justify-center bg-gray-50 p-4">
-        <Card className="max-w-md w-full p-8 text-center">
-          <div className="mb-6 flex justify-center">
-            <div className="w-16 h-16 bg-indigo-50 rounded-2xl flex items-center justify-center">
-              <CreditCard className="w-8 h-8 text-indigo-600" />
-            </div>
-          </div>
-          <h1 className="text-2xl font-bold text-gray-900 mb-2">Smart Installment Manager</h1>
-          <p className="text-gray-600 mb-8">Manage your business installments with ease and security.</p>
-          
-          {loginError && (
-            <div className="mb-6 p-4 bg-rose-50 border border-rose-100 text-rose-600 rounded-xl text-sm flex items-center gap-3 text-left">
-              <AlertCircle className="w-5 h-5 flex-shrink-0" />
-              <p>{loginError}</p>
-            </div>
-          )}
-
-          <Button onClick={handleLogin} className="w-full py-6 text-lg">
-            Sign in with Google
-          </Button>
-          <p className="mt-6 text-xs text-gray-400">
-            By signing in, you agree to our Terms of Service and Privacy Policy.
-          </p>
-        </Card>
-      </div>
+      <Login 
+        onLogin={handleLogin} 
+        error={loginError} 
+        t={t} 
+        lang={lang} 
+        setLang={setLang} 
+      />
     );
   }
 
@@ -800,6 +988,7 @@ export default function App() {
           user={user} 
           onComplete={() => setProfileLoading(true)} 
           onLogout={handleLogout}
+          t={t}
         />
       </div>
     );
@@ -812,7 +1001,7 @@ export default function App() {
       {!isOnline && (
         <div className="bg-amber-500 text-white text-[10px] py-1 px-4 text-center font-bold sticky top-0 z-[100] flex items-center justify-center gap-2">
           <Info className="w-3 h-3" />
-          WORKING OFFLINE: Your changes will sync automatically when you connect to internet.
+          {t.workingOffline}
         </div>
       )}
 
@@ -830,58 +1019,58 @@ export default function App() {
             active={activeTab === "dashboard"} 
             onClick={() => setActiveTab("dashboard")}
             icon={<LayoutDashboard className="w-5 h-5" />}
-            label="Dashboard"
+            label={t.dashboard}
           />
           <NavButton 
             active={activeTab === "customers"} 
             onClick={() => setActiveTab("customers")}
             icon={<Users className="w-5 h-5" />}
-            label="Customers"
+            label={t.customers}
           />
           <NavButton 
             active={activeTab === "installments"} 
             onClick={() => setActiveTab("installments")}
             icon={<FileText className="w-5 h-5" />}
-            label="Installments"
+            label={t.installments}
           />
           <NavButton 
             active={activeTab === "reminders"} 
             onClick={() => setActiveTab("reminders")}
             icon={<Bell className="w-5 h-5" />}
-            label="Reminders"
+            label={t.reminders}
             badge={reminderCount}
           />
           <NavButton 
             active={activeTab === "salespeople"} 
             onClick={() => setActiveTab("salespeople")}
             icon={<Users className="w-5 h-5" />}
-            label="Salespeople"
+            label={t.salespeople}
           />
           <NavButton 
             active={activeTab === "trash"} 
             onClick={() => setActiveTab("trash")}
             icon={<Trash2 className="w-5 h-5" />}
-            label="Trash"
+            label={t.trash}
             badge={trashCustomers.length + trashSalespeople.length}
           />
           <NavButton 
             active={activeTab === "settings"} 
             onClick={() => setActiveTab("settings")}
             icon={<Settings className="w-5 h-5" />}
-            label="Settings"
+            label={t.settings}
           />
 
           <div className="mt-auto hidden md:block">
             <div className="flex items-center gap-3 p-2 mb-4">
-              <img src={user.photoURL || ""} alt="" className="w-8 h-8 rounded-full" referrerPolicy="no-referrer" />
+              <img src={user.photoURL || `https://ui-avatars.com/api/?name=${user.displayName || user.phoneNumber || 'User'}`} alt="" className="w-8 h-8 rounded-full" referrerPolicy="no-referrer" />
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium truncate">{user.displayName}</p>
-                <p className="text-xs text-gray-500 truncate">{user.email}</p>
+                <p className="text-sm font-medium truncate">{user.displayName || user.phoneNumber}</p>
+                <p className="text-xs text-gray-500 truncate">{user.email || 'Phone Login'}</p>
               </div>
             </div>
             <Button variant="ghost" onClick={handleLogout} className="w-full justify-start gap-2 text-rose-600 hover:text-rose-700 hover:bg-rose-50">
               <LogOut className="w-4 h-4" />
-              Logout
+              {t.logout}
             </Button>
           </div>
         </div>
@@ -890,22 +1079,64 @@ export default function App() {
       {/* Main Content */}
       <main className="flex-1 overflow-y-auto order-1 md:order-2 relative">
         <header className="sticky top-0 bg-white/80 backdrop-blur-md border-b border-gray-200 px-4 md:px-8 py-4 md:py-4 pt-[calc(1rem+env(safe-area-inset-top))] flex items-center justify-between z-40">
-          <h2 className="text-xl font-bold capitalize">{activeTab}</h2>
+          <h2 className="text-xl font-bold capitalize">{t[activeTab as keyof typeof t] || activeTab}</h2>
           <div className="flex items-center gap-4">
             <div className="relative hidden sm:block">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
               <Input 
-                placeholder="Search..." 
+                placeholder={t.search} 
                 className="pl-9 w-64" 
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
             </div>
-            <div className="md:hidden">
-              <img src={user.photoURL || ""} alt="" className="w-8 h-8 rounded-full" referrerPolicy="no-referrer" />
+            <div className="flex items-center gap-2">
+              <select 
+                value={lang} 
+                onChange={(e) => setLang(e.target.value as Language)}
+                className="bg-gray-50 border border-gray-200 rounded-lg px-2 py-1 text-xs font-medium focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              >
+                <option value="en">EN</option>
+                <option value="ur">اردو</option>
+                <option value="ar">عربي</option>
+                <option value="fa">فارسی</option>
+                <option value="hi">हिन्दी</option>
+                <option value="ps">پښتو</option>
+              </select>
+              <div className="md:hidden flex items-center gap-2">
+                <img src={user.photoURL || `https://ui-avatars.com/api/?name=${user.displayName || user.phoneNumber || 'User'}`} alt="" className="w-8 h-8 rounded-full" referrerPolicy="no-referrer" />
+                <Button variant="ghost" size="sm" onClick={handleLogout} className="p-1 text-rose-600">
+                  <LogOut className="w-5 h-5" />
+                </Button>
+              </div>
             </div>
           </div>
         </header>
+
+        {showBackupPrompt && (
+          <div className="m-4 md:mx-8 p-4 bg-indigo-600 text-white rounded-2xl shadow-lg shadow-indigo-200 flex flex-col sm:flex-row items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center flex-shrink-0">
+                <Share2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h4 className="font-bold text-sm">{t.linkGmail}</h4>
+                <p className="text-xs text-indigo-100">{t.gmailBackupInfo}</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 w-full sm:w-auto">
+              <Button onClick={handleLinkGmail} size="sm" className="bg-white text-indigo-600 hover:bg-indigo-50 flex-1 sm:flex-none">
+                {t.linkNow}
+              </Button>
+              <Button onClick={() => {
+                localStorage.setItem('backup_prompt_dismissed', 'true');
+                setShowBackupPrompt(false);
+              }} variant="ghost" size="sm" className="text-white hover:bg-white/10 flex-1 sm:flex-none">
+                {t.later}
+              </Button>
+            </div>
+          </div>
+        )}
 
         <div className="p-4 md:p-8 max-w-7xl mx-auto">
           <AnimatePresence mode="wait">
@@ -920,6 +1151,7 @@ export default function App() {
                 onAddInstallment={() => setIsAddingInstallment(true)}
                 businessProfile={businessProfile}
                 onNavigate={setActiveTab}
+                t={t}
               />
             )}
             {activeTab === "customers" && (
@@ -929,6 +1161,7 @@ export default function App() {
                 installments={installments}
                 payments={payments}
                 searchQuery={searchQuery}
+                t={t}
               />
             )}
             {activeTab === "installments" && (
@@ -939,6 +1172,7 @@ export default function App() {
                 payments={activePayments}
                 searchQuery={searchQuery}
                 businessProfile={businessProfile}
+                t={t}
               />
             )}
             {activeTab === "reminders" && (
@@ -946,6 +1180,7 @@ export default function App() {
                 installments={activeInstallments} 
                 customers={activeCustomers}
                 businessProfile={businessProfile}
+                t={t}
               />
             )}
             {activeTab === "salespeople" && (
@@ -953,6 +1188,7 @@ export default function App() {
                 salespeople={activeSalespeople}
                 installments={activeInstallments}
                 customers={activeCustomers}
+                t={t}
               />
             )}
             {activeTab === "trash" && (
@@ -961,12 +1197,14 @@ export default function App() {
                 salespeople={trashSalespeople}
                 installments={installments}
                 payments={payments}
+                t={t}
               />
             )}
             {activeTab === "settings" && (
               <SettingsView 
                 profile={businessProfile}
                 user={user}
+                t={t}
               />
             )}
           </AnimatePresence>
@@ -986,6 +1224,7 @@ export default function App() {
                 setPreselectedCustomerId(id);
                 setIsAddingInstallment(true);
               }}
+              t={t}
             />
           )}
           {isAddingInstallment && (
@@ -999,6 +1238,7 @@ export default function App() {
                 setPreselectedCustomerId(null);
                 setPreselectedSalespersonId(null);
               }} 
+              t={t}
             />
           )}
         </AnimatePresence>
@@ -1034,7 +1274,7 @@ function NavButton({ active, onClick, icon, label, badge }: { active: boolean; o
   );
 }
 
-const DashboardView = React.memo(({ customers, installments, payments, salespeople, onAddCustomer, onAddInstallment, businessProfile, onNavigate }: { 
+const DashboardView = React.memo(({ customers, installments, payments, salespeople, onAddCustomer, onAddInstallment, businessProfile, onNavigate, t }: { 
   customers: Customer[]; 
   installments: Installment[]; 
   payments: Payment[];
@@ -1043,6 +1283,7 @@ const DashboardView = React.memo(({ customers, installments, payments, salespeop
   onAddInstallment: () => void;
   businessProfile: BusinessProfile | null;
   onNavigate: (tab: any) => void;
+  t: any;
 }) => {
   const stats = useMemo(() => {
     const totalSalesValue = installments.reduce((acc, curr) => acc + curr.totalPrice, 0);
@@ -1080,59 +1321,59 @@ const DashboardView = React.memo(({ customers, installments, payments, salespeop
     >
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h2 className="text-2xl font-bold text-slate-900">{businessProfile?.businessName || "Business Overview"}</h2>
-          <p className="text-slate-500">Welcome back, {businessProfile?.ownerName || "here's what's happening today"}.</p>
+          <h2 className="text-2xl font-bold text-slate-900">{businessProfile?.businessName || t.businessOverview}</h2>
+          <p className="text-slate-500">{t.welcomeBack}, {businessProfile?.ownerName || t.welcomeDesc}.</p>
         </div>
         <div className="flex gap-2">
           <Button onClick={onAddCustomer} className="bg-indigo-600 hover:bg-indigo-700 gap-2">
             <Plus className="w-4 h-4" />
-            Add Customer
+            {t.addCustomer}
           </Button>
           <Button onClick={onAddInstallment} variant="outline" className="gap-2 border-indigo-200 text-indigo-600 hover:bg-indigo-50">
             <CreditCard className="w-4 h-4" />
-            New Plan
+            {t.newPlan}
           </Button>
         </div>
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-6 gap-4">
         <StatCard 
-          label="Total Customers" 
+          label={t.totalCustomers} 
           value={stats.totalCustomers} 
           icon={<Users className="text-indigo-600" />} 
           color="indigo" 
           onClick={() => onNavigate('customers')}
         />
         <StatCard 
-          label="Total Sales Value" 
+          label={t.totalSalesValue} 
           value={`Rs. ${stats.totalSalesValue.toLocaleString()}`} 
           icon={<Store className="text-slate-600" />} 
           color="slate" 
           onClick={() => onNavigate('installments')}
         />
         <StatCard 
-          label="Total Outstanding" 
+          label={t.totalOutstanding} 
           value={`Rs. ${stats.totalOutstanding.toLocaleString()}`} 
           icon={<AlertCircle className="text-amber-600" />} 
           color="amber" 
           onClick={() => onNavigate('installments')}
         />
         <StatCard 
-          label="Total Received" 
+          label={t.totalReceived} 
           value={`Rs. ${stats.totalReceived.toLocaleString()}`} 
           icon={<CheckCircle2 className="text-emerald-600" />} 
           color="emerald" 
           onClick={() => onNavigate('installments')}
         />
         <StatCard 
-          label="Monthly Earnings" 
+          label={t.monthlyEarnings} 
           value={`Rs. ${stats.monthlyEarnings.toLocaleString()}`} 
           icon={<TrendingUp className="text-violet-600" />} 
           color="violet" 
           onClick={() => onNavigate('installments')}
         />
         <StatCard 
-          label="Due Reminders" 
+          label={t.dueReminders} 
           value={stats.dueReminders} 
           icon={<Bell className="text-rose-600" />} 
           color="rose" 
@@ -1144,55 +1385,57 @@ const DashboardView = React.memo(({ customers, installments, payments, salespeop
         <Card className="p-6">
           <h3 className="font-bold mb-4 flex items-center gap-2 text-slate-800">
             <Calendar className="w-5 h-5 text-indigo-600" />
-            Upcoming Payments
+            {t.upcomingPayments}
           </h3>
           <div className="space-y-4">
             {installments.filter(i => i.status === 'active').slice(0, 5).map(inst => {
               const customer = customers.find(c => c.id === inst.customerId);
               const salesperson = salespeople.find(s => s.id === inst.salespersonId);
+              if (!customer) return null;
               return (
                 <div key={inst.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-lg border border-slate-100">
                   <div>
-                    <p className="font-semibold text-sm text-slate-900">{customer?.name || 'Unknown'}</p>
+                    <p className="font-semibold text-sm text-slate-900">{customer.name}</p>
                     <div className="flex items-center gap-1.5">
                       <p className="text-xs text-slate-500">{inst.productName}</p>
                       <span className="text-[9px] px-1.5 py-0.5 bg-indigo-50 text-indigo-600 rounded font-bold uppercase tracking-tighter">
-                        By {salesperson?.name || 'Owner'}
+                        {t.by} {salesperson?.name || t.owner}
                       </span>
                     </div>
                   </div>
                   <div className="text-right">
                     <p className="font-bold text-sm text-indigo-600">Rs. {inst.monthlyInstallment.toLocaleString()}</p>
-                    <p className="text-[10px] text-slate-400">Due: {safeFormat(inst.nextDueDate, 'MMM dd')}</p>
+                    <p className="text-[10px] text-slate-400">{t.due}: {safeFormat(inst.nextDueDate, 'MMM dd')}</p>
                   </div>
                 </div>
               );
             })}
-            {installments.length === 0 && <p className="text-sm text-slate-400 text-center py-4">No active installments</p>}
+            {installments.filter(i => i.status === 'active').length === 0 && <p className="text-sm text-slate-400 text-center py-4">{t.noActiveInstallments}</p>}
           </div>
         </Card>
 
         <Card className="p-6">
           <h3 className="font-bold mb-4 flex items-center gap-2 text-slate-800">
             <TrendingUp className="w-5 h-5 text-emerald-600" />
-            Recent Activity
+            {t.recentActivity}
           </h3>
           <div className="space-y-4">
             {payments.slice(0, 5).map(pay => {
               const inst = installments.find(i => i.id === pay.installmentId);
               const customer = customers.find(c => c.id === inst?.customerId);
               const salesperson = salespeople.find(s => s.id === inst?.salespersonId);
+              if (!customer || !inst) return null;
               return (
                 <div key={pay.id} className="flex items-center gap-3 p-3 border-b border-slate-50 last:border-0">
                   <div className="w-8 h-8 bg-emerald-100 rounded-full flex items-center justify-center flex-shrink-0">
                     <div className="text-[10px] font-bold text-emerald-600">Rs</div>
                   </div>
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-semibold text-slate-900 truncate">{customer?.name || 'Unknown'}</p>
+                    <p className="text-sm font-semibold text-slate-900 truncate">{customer.name}</p>
                     <div className="flex items-center gap-2">
-                      <p className="text-xs text-slate-500">Payment for {inst?.productName || 'Installment'}</p>
+                      <p className="text-xs text-slate-500">{t.paymentFor} {inst.productName}</p>
                       <span className="text-[8px] px-1 bg-slate-100 text-slate-500 rounded font-bold uppercase">
-                        {salesperson?.name || 'Owner'}
+                        {t.by} {salesperson?.name || t.owner}
                       </span>
                     </div>
                   </div>
@@ -1200,7 +1443,7 @@ const DashboardView = React.memo(({ customers, installments, payments, salespeop
                 </div>
               );
             })}
-            {payments.length === 0 && <p className="text-sm text-slate-400 text-center py-4">No recent payments</p>}
+            {payments.length === 0 && <p className="text-sm text-slate-400 text-center py-4">{t.noRecentPayments}</p>}
           </div>
         </Card>
       </div>
@@ -1233,7 +1476,7 @@ function StatCard({ label, value, icon, color, onClick }: { label: string; value
   );
 }
 
-const SettingsView = React.memo(({ profile, user }: { profile: BusinessProfile | null; user: FirebaseUser }) => {
+const SettingsView = React.memo(({ profile, user, t }: { profile: BusinessProfile | null; user: FirebaseUser; t: any }) => {
   const [formData, setFormData] = useState<BusinessProfile>(profile || {
     businessName: "",
     ownerName: user.displayName || "",
@@ -1241,15 +1484,32 @@ const SettingsView = React.memo(({ profile, user }: { profile: BusinessProfile |
     address: "",
     tagline: "",
   });
+  const [photo, setPhoto] = useState<File | null>(null);
+  const [photoPreview, setPhotoPreview] = useState<string | null>(profile?.logoUrl || null);
   const [loading, setLoading] = useState(false);
   const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    if (!photo) return;
+    const objectUrl = URL.createObjectURL(photo);
+    setPhotoPreview(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [photo]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     try {
+      let logoUrl = profile?.logoUrl || "";
+      if (photo && navigator.onLine) {
+        const storageRef = ref(storage, `profiles/${user.uid}/logo_${Date.now()}`);
+        await uploadBytes(storageRef, photo);
+        logoUrl = await getDownloadURL(storageRef);
+      }
+
       await setDoc(doc(db, "profiles", user.uid), {
         ...formData,
+        logoUrl,
         updatedAt: serverTimestamp(),
       });
       setSaved(true);
@@ -1274,31 +1534,44 @@ const SettingsView = React.memo(({ profile, user }: { profile: BusinessProfile |
             <Settings className="w-6 h-6 text-indigo-600" />
           </div>
           <div>
-            <h3 className="text-xl font-bold">Business Settings</h3>
-            <p className="text-sm text-gray-500">Update your business information for receipts and slips.</p>
+            <h3 className="text-xl font-bold">{t.businessSettings}</h3>
+            <p className="text-sm text-gray-500">{t.businessSettingsDesc}</p>
           </div>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-6">
+          <div className="flex justify-center mb-6">
+            <div className="w-24 h-24 rounded-2xl overflow-hidden border-2 border-dashed border-gray-200 flex items-center justify-center relative hover:border-indigo-400 transition-colors cursor-pointer">
+              <input type="file" accept="image/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={e => setPhoto(e.target.files?.[0] || null)} />
+              {photoPreview ? (
+                <img src={photoPreview} alt="" className="w-full h-full object-cover" />
+              ) : (
+                <Camera className="w-8 h-8 text-gray-400" />
+              )}
+            </div>
+          </div>
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="space-y-1">
-              <label className="text-xs font-bold text-gray-500 uppercase">Business Name</label>
+              <label className="text-xs font-bold text-gray-500 uppercase">{t.businessName}</label>
               <Input 
                 required 
                 value={formData.businessName}
                 onChange={e => setFormData({...formData, businessName: e.target.value})}
+                placeholder={t.businessNamePlaceholder}
               />
             </div>
             <div className="space-y-1">
-              <label className="text-xs font-bold text-gray-500 uppercase">Owner Name</label>
+              <label className="text-xs font-bold text-gray-500 uppercase">{t.ownerName}</label>
               <Input 
                 required 
                 value={formData.ownerName}
                 onChange={e => setFormData({...formData, ownerName: e.target.value})}
+                placeholder={t.fullNamePlaceholder}
               />
             </div>
             <div className="space-y-1">
-              <label className="text-xs font-bold text-gray-500 uppercase">Contact Phone</label>
+              <label className="text-xs font-bold text-gray-500 uppercase">{t.phone}</label>
               <Input 
                 required 
                 value={formData.phone}
@@ -1307,28 +1580,31 @@ const SettingsView = React.memo(({ profile, user }: { profile: BusinessProfile |
                   if (!val.startsWith('+92')) val = '+92' + val.replace(/^\+?92?/, '');
                   setFormData({...formData, phone: val});
                 }}
+                placeholder={t.phonePlaceholder}
               />
             </div>
             <div className="space-y-1">
-              <label className="text-xs font-bold text-gray-500 uppercase">Business Tagline</label>
+              <label className="text-xs font-bold text-gray-500 uppercase">{t.tagline}</label>
               <Input 
                 value={formData.tagline}
                 onChange={e => setFormData({...formData, tagline: e.target.value})}
+                placeholder={t.taglinePlaceholder}
               />
             </div>
           </div>
           <div className="space-y-1">
-            <label className="text-xs font-bold text-gray-500 uppercase">Business Address</label>
+            <label className="text-xs font-bold text-gray-500 uppercase">{t.address}</label>
             <Input 
               required 
               value={formData.address}
               onChange={e => setFormData({...formData, address: e.target.value})}
+              placeholder={t.addressPlaceholder}
             />
           </div>
 
           <div className="pt-4 flex items-center gap-4">
             <Button type="submit" disabled={loading} className="px-8">
-              {loading ? "Saving..." : "Save Changes"}
+              {loading ? t.saving : t.saveChanges}
             </Button>
             {saved && (
               <motion.p 
@@ -1337,7 +1613,7 @@ const SettingsView = React.memo(({ profile, user }: { profile: BusinessProfile |
                 className="text-emerald-600 text-sm font-medium flex items-center gap-2"
               >
                 <CheckCircle2 className="w-4 h-4" />
-                Settings saved successfully!
+                {t.settingsSaved}
               </motion.p>
             )}
           </div>
@@ -1349,9 +1625,9 @@ const SettingsView = React.memo(({ profile, user }: { profile: BusinessProfile |
           <Info className="w-5 h-5 text-indigo-600" />
         </div>
         <div>
-          <h4 className="font-bold text-indigo-900 text-sm">Professional Tip</h4>
+          <h4 className="font-bold text-indigo-900 text-sm">{t.proTip}</h4>
           <p className="text-indigo-700 text-sm mt-1">
-            The information you provide here will be automatically included in all PDF receipts and payment slips you generate for your customers. Make sure it's accurate!
+            {t.proTipDesc}
           </p>
         </div>
       </div>
@@ -1359,12 +1635,13 @@ const SettingsView = React.memo(({ profile, user }: { profile: BusinessProfile |
   );
 });
 
-const CustomersView = React.memo(({ customers, salespeople, installments, payments, searchQuery }: { 
+const CustomersView = React.memo(({ customers, salespeople, installments, payments, searchQuery, t }: { 
   customers: Customer[]; 
   salespeople: Salesperson[]; 
   installments: Installment[];
   payments: Payment[];
-  searchQuery: string 
+  searchQuery: string;
+  t: any;
 }) => {
   const [isAdding, setIsAdding] = useState(false);
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
@@ -1422,10 +1699,10 @@ const CustomersView = React.memo(({ customers, salespeople, installments, paymen
       className="space-y-6"
     >
       <div className="flex justify-between items-center">
-        <p className="text-sm text-slate-500 font-medium">{filteredCustomers.length} Customers found</p>
+        <p className="text-sm text-slate-500 font-medium">{filteredCustomers.length} {t.customersFound}</p>
         <Button onClick={() => setIsAdding(true)} className="bg-indigo-600 hover:bg-indigo-700 gap-2 shadow-sm">
           <Plus className="w-4 h-4" />
-          Add Customer
+          {t.addCustomer}
         </Button>
       </div>
 
@@ -1448,20 +1725,27 @@ const CustomersView = React.memo(({ customers, salespeople, installments, paymen
                     setCustomerToDelete(customer);
                   }}
                   className="p-2 text-slate-400 md:text-slate-300 hover:text-rose-500 hover:bg-rose-50 rounded-lg transition-all md:opacity-0 md:group-hover:opacity-100"
-                  title="Delete Customer"
+                  title={t.deleteCustomer}
                 >
                   <Trash2 className="w-4 h-4" />
                 </button>
                 <ChevronRight className="w-5 h-5 text-slate-300 group-hover:text-indigo-500 transition-all group-hover:translate-x-1" />
               </div>
             </div>
-            <h4 className="font-bold text-slate-900 text-lg mb-1">{customer.name}</h4>
-            <div className="space-y-1 mb-3">
-              <p className="text-sm text-slate-500 flex items-center gap-2">
-                <Phone className="w-3 h-3" />
-                {customer.phone}
-              </p>
-              <p className="text-xs text-slate-400 font-medium tracking-wide">CNIC: {customer.cnic}</p>
+            <div className="flex items-center gap-4 mb-4">
+              <div className="w-12 h-12 rounded-full overflow-hidden bg-indigo-50 border border-indigo-100 flex-shrink-0">
+                {customer.photoUrl ? (
+                  <img src={customer.photoUrl} alt="" className="w-full h-full object-cover" />
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center text-indigo-600 font-bold text-lg">
+                    {customer.name.charAt(0)}
+                  </div>
+                )}
+              </div>
+              <div className="flex-1 min-w-0">
+                <h4 className="font-bold text-slate-900 text-lg truncate">{customer.name}</h4>
+                <p className="text-sm text-slate-500 truncate">{customer.phone}</p>
+              </div>
             </div>
 
             {customer.salespersonId && (
@@ -1482,14 +1766,16 @@ const CustomersView = React.memo(({ customers, salespeople, installments, paymen
             customer={editingCustomer} 
             salespeople={salespeople}
             onClose={() => { setIsAdding(false); setEditingCustomer(null); }} 
+            t={t}
           />
         )}
         {customerToDelete && (
           <DeleteConfirmModal 
-            title="Delete Customer"
-            message={`Are you sure you want to delete ${customerToDelete.name}? This action cannot be undone.`}
+            title={t.deleteCustomer}
+            message={`${t.deleteCustomerConfirm} ${customerToDelete.name}?`}
             onConfirm={confirmDelete}
             onCancel={() => setCustomerToDelete(null)}
+            t={t}
           />
         )}
       </AnimatePresence>
@@ -1497,7 +1783,7 @@ const CustomersView = React.memo(({ customers, salespeople, installments, paymen
   );
 });
 
-const CustomerModal = React.memo(({ customer, salespeople, onClose, onSuccess }: { customer: Customer | null; salespeople: Salesperson[]; onClose: () => void; onSuccess?: (customerId: string) => void }) => {
+const CustomerModal = React.memo(({ customer, salespeople, onClose, onSuccess, t }: { customer: Customer | null; salespeople: Salesperson[]; onClose: () => void; onSuccess?: (customerId: string) => void; t: any }) => {
   const [formData, setFormData] = useState({
     name: customer?.name || "",
     phone: customer?.phone || "+92",
@@ -1517,110 +1803,101 @@ const CustomerModal = React.memo(({ customer, salespeople, onClose, onSuccess }:
   });
   const [photo, setPhoto] = useState<File | null>(null);
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
+  const [profilePhoto, setProfilePhoto] = useState<File | null>(null);
+  const [profilePhotoPreview, setProfilePhotoPreview] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
 
   useEffect(() => {
-    if (customer?.cnicPhotoUrl) {
-      setPhotoPreview(customer.cnicPhotoUrl);
-    }
+    if (customer?.cnicPhotoUrl) setPhotoPreview(customer.cnicPhotoUrl);
+    if (customer?.photoUrl) setProfilePhotoPreview(customer.photoUrl);
   }, [customer]);
 
   useEffect(() => {
-    if (!photo) {
-      if (!customer?.cnicPhotoUrl) setPhotoPreview(null);
-      return;
-    }
+    if (!photo) return;
     const objectUrl = URL.createObjectURL(photo);
     setPhotoPreview(objectUrl);
     return () => URL.revokeObjectURL(objectUrl);
-  }, [photo, customer]);
+  }, [photo]);
+
+  useEffect(() => {
+    if (!profilePhoto) return;
+    const objectUrl = URL.createObjectURL(profilePhoto);
+    setProfilePhotoPreview(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [profilePhoto]);
+
+  const uploadFile = async (file: File, path: string): Promise<string> => {
+    const storageRef = ref(storage, `${path}/${auth.currentUser!.uid}/${Date.now()}_${file.name}`);
+    const uploadTask = uploadBytesResumable(storageRef, file);
+    
+    return new Promise((resolve, reject) => {
+      uploadTask.on('state_changed', 
+        (snapshot) => {
+          const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
+          setUploadProgress(progress);
+        }, 
+        (error) => {
+          console.error("Upload failed:", error);
+          reject(error);
+        }, 
+        async () => {
+          try {
+            const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
+            resolve(downloadURL);
+          } catch (err) {
+            reject(err);
+          }
+        }
+      );
+    });
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    console.log("CustomerModal: handleSubmit started");
-    if (!auth.currentUser) {
-      console.error("CustomerModal: No user authenticated");
-      return setError("User not authenticated. Please login again.");
-    }
+    if (!auth.currentUser) return setError("User not authenticated.");
     
     setLoading(true);
     setError(null);
     setSuccess(false);
-    setUploadProgress(0);
-    
-    // Small delay to ensure loading state is rendered
-    await new Promise(resolve => setTimeout(resolve, 100));
     
     try {
-      let photoUrl = customer?.cnicPhotoUrl || "";
+      let cnicPhotoUrl = customer?.cnicPhotoUrl || "";
+      let photoUrl = customer?.photoUrl || "";
       
-      if (photo) {
-        if (navigator.onLine) {
-          console.log("CustomerModal: Starting photo upload...");
-          const storageRef = ref(storage, `cnics/${auth.currentUser.uid}/${Date.now()}_${photo.name}`);
-          const uploadTask = uploadBytesResumable(storageRef, photo);
-          
-          const uploadPromise = new Promise<string>((resolve, reject) => {
-            uploadTask.on('state_changed', 
-              (snapshot) => {
-                const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
-                setUploadProgress(progress);
-              }, 
-              (error) => reject(error), 
-              async () => {
-                const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
-                resolve(downloadURL);
-              }
-            );
-          });
-          photoUrl = await withTimeout(uploadPromise, 30000);
-        } else {
-          console.warn("CustomerModal: Offline, skipping photo upload");
-          // We can't upload photo offline, but we'll save the rest
-        }
+      if (photo && navigator.onLine) {
+        cnicPhotoUrl = await withTimeout(uploadFile(photo, 'cnics'), 60000);
+      }
+      
+      if (profilePhoto && navigator.onLine) {
+        photoUrl = await withTimeout(uploadFile(profilePhoto, 'customers'), 60000);
       }
 
       const data = {
         ...formData,
-        cnicPhotoUrl: photoUrl,
+        cnicPhotoUrl,
+        photoUrl,
         userId: auth.currentUser.uid,
         updatedAt: serverTimestamp(),
       };
 
-      // OPTIMISTIC SAVE: Don't await the server response for the UI to continue
-      // Firestore will handle the sync in the background
       if (customer) {
-        updateDoc(doc(db, "customers", customer.id), data).catch(err => console.error("Background update failed", err));
-        setSuccess(true);
-        setLoading(false);
-        setTimeout(() => {
-          onClose();
-          if (onSuccess) onSuccess(customer.id);
-        }, 1200);
+        await updateDoc(doc(db, "customers", customer.id), data);
       } else {
-        // Generate ID client-side for true optimism
-        const customerRef = doc(collection(db, "customers"));
-        const customerId = customerRef.id;
-        
-        setDoc(customerRef, {
+        await addDoc(collection(db, "customers"), {
           ...data,
           createdAt: serverTimestamp(),
-        }).catch(err => console.error("Background add failed", err));
-        
-        setSuccess(true);
-        setLoading(false);
-        setTimeout(() => {
-          onClose();
-          if (onSuccess) onSuccess(customerId);
-        }, 1200);
+        });
       }
-
+      
+      setSuccess(true);
+      setTimeout(() => onClose(), 1500);
     } catch (err: any) {
-      console.error("CustomerModal: Error saving customer", err);
-      setError(err.message || "Failed to save customer. Please try again.");
+      console.error("Error saving customer:", err);
+      setError(err.message || "Failed to save customer.");
+    } finally {
       setLoading(false);
     }
   };
@@ -1634,7 +1911,7 @@ const CustomerModal = React.memo(({ customer, salespeople, onClose, onSuccess }:
         className="bg-white rounded-2xl w-full max-w-lg overflow-hidden shadow-2xl my-auto"
       >
         <div className="p-6 border-b border-gray-100 flex items-center justify-between">
-          <h3 className="text-xl font-bold">{customer ? 'Edit Customer' : 'Add New Customer'}</h3>
+          <h3 className="text-xl font-bold">{customer ? t.editCustomer : t.addNewCustomer}</h3>
           <Button variant="ghost" onClick={onClose}>&times;</Button>
         </div>
         <form onSubmit={handleSubmit} className="p-6 space-y-4">
@@ -1647,37 +1924,54 @@ const CustomerModal = React.memo(({ customer, salespeople, onClose, onSuccess }:
           {success && (
             <div className="p-3 bg-emerald-50 border border-emerald-100 text-emerald-600 text-sm rounded-lg flex items-center gap-2">
               <CheckCircle2 className="w-4 h-4" />
-              Customer saved successfully!
+              {t.customerSaved}
             </div>
           )}
 
           <div className="space-y-1">
-            <label className="text-xs font-bold text-gray-500 uppercase">Salesperson (Worker Profile)</label>
+            <label className="text-xs font-bold text-gray-500 uppercase">{t.salesperson}</label>
             <select 
               className="flex h-10 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
               value={formData.salespersonId}
               onChange={e => setFormData({...formData, salespersonId: e.target.value})}
             >
-              <option value="">Direct Sale (My Own Profile)</option>
+              <option value="">{t.directSale}</option>
               {salespeople.map(s => (
                 <option key={s.id} value={s.id}>{s.name}</option>
               ))}
             </select>
-            <p className="text-[10px] text-gray-400">Select which worker's profile this customer belongs to.</p>
           </div>
 
-          <div className="space-y-1">
-            <label className="text-xs font-bold text-gray-500 uppercase">Full Name</label>
-            <Input 
-              required 
-              value={formData.name} 
-              onChange={e => setFormData({...formData, name: e.target.value})} 
-              placeholder="e.g. Muhammad Ali" 
-            />
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-gray-500 uppercase">{t.profilePhoto}</label>
+              <div className="flex items-center gap-4">
+                <div className="w-16 h-16 rounded-full overflow-hidden border-2 border-dashed border-gray-200 flex items-center justify-center relative hover:border-indigo-400 transition-colors cursor-pointer">
+                  <input type="file" accept="image/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={e => setProfilePhoto(e.target.files?.[0] || null)} />
+                  {profilePhotoPreview ? (
+                    <img src={profilePhotoPreview} alt="" className="w-full h-full object-cover" />
+                  ) : (
+                    <Camera className="w-6 h-6 text-gray-400" />
+                  )}
+                </div>
+                <div className="text-xs text-gray-500">{t.optional}</div>
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-gray-500 uppercase">{t.fullName}</label>
+              <Input 
+                required 
+                value={formData.name} 
+                onChange={e => setFormData({...formData, name: e.target.value})} 
+                placeholder={t.fullNamePlaceholder} 
+              />
+            </div>
           </div>
+
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-1">
-              <label className="text-xs font-bold text-gray-500 uppercase">Phone Number</label>
+              <label className="text-xs font-bold text-gray-500 uppercase">{t.phone}</label>
               <Input 
                 required 
                 value={formData.phone} 
@@ -1686,28 +1980,28 @@ const CustomerModal = React.memo(({ customer, salespeople, onClose, onSuccess }:
                   if (!val.startsWith('+92')) val = '+92' + val.replace(/^\+?92?/, '');
                   setFormData({...formData, phone: val});
                 }} 
-                placeholder="+92 3xx xxxxxxx" 
+                placeholder={t.phonePlaceholder} 
               />
             </div>
             <div className="space-y-1">
-              <label className="text-xs font-bold text-gray-500 uppercase">CNIC Number</label>
-              <Input required value={formData.cnic} onChange={e => setFormData({...formData, cnic: e.target.value})} placeholder="xxxxx-xxxxxxx-x" />
+              <label className="text-xs font-bold text-gray-500 uppercase">{t.cnic}</label>
+              <Input required value={formData.cnic} onChange={e => setFormData({...formData, cnic: e.target.value})} placeholder={t.cnicPlaceholder} />
             </div>
           </div>
           <div className="space-y-1">
-            <label className="text-xs font-bold text-gray-500 uppercase">Address</label>
-            <Input required value={formData.address} onChange={e => setFormData({...formData, address: e.target.value})} placeholder="Full residential address" />
+            <label className="text-xs font-bold text-gray-500 uppercase">{t.address}</label>
+            <Input required value={formData.address} onChange={e => setFormData({...formData, address: e.target.value})} placeholder={t.addressPlaceholder} />
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-4 border-t border-gray-100">
             <div className="space-y-4">
-              <h4 className="text-sm font-bold text-indigo-600 uppercase">Guarantor 1</h4>
+              <h4 className="text-sm font-bold text-indigo-600 uppercase">{t.guarantor1}</h4>
               <div className="space-y-1">
-                <label className="text-xs font-bold text-gray-500 uppercase">Name</label>
-                <Input required value={formData.guarantor1.name} onChange={e => setFormData({...formData, guarantor1: {...formData.guarantor1, name: e.target.value}})} placeholder="Guarantor 1 Name" />
+                <label className="text-xs font-bold text-gray-500 uppercase">{t.name}</label>
+                <Input required value={formData.guarantor1.name} onChange={e => setFormData({...formData, guarantor1: {...formData.guarantor1, name: e.target.value}})} placeholder={t.guarantorNamePlaceholder} />
               </div>
               <div className="space-y-1">
-                <label className="text-xs font-bold text-gray-500 uppercase">Phone</label>
+                <label className="text-xs font-bold text-gray-500 uppercase">{t.phone}</label>
                 <Input 
                   required 
                   value={formData.guarantor1.phone} 
@@ -1716,23 +2010,23 @@ const CustomerModal = React.memo(({ customer, salespeople, onClose, onSuccess }:
                     if (!val.startsWith('+92')) val = '+92' + val.replace(/^\+?92?/, '');
                     setFormData({...formData, guarantor1: {...formData.guarantor1, phone: val}});
                   }} 
-                  placeholder="+92 3xx xxxxxxx" 
+                  placeholder={t.phonePlaceholder} 
                 />
               </div>
               <div className="space-y-1">
-                <label className="text-xs font-bold text-gray-500 uppercase">CNIC</label>
-                <Input required value={formData.guarantor1.cnic} onChange={e => setFormData({...formData, guarantor1: {...formData.guarantor1, cnic: e.target.value}})} placeholder="xxxxx-xxxxxxx-x" />
+                <label className="text-xs font-bold text-gray-500 uppercase">{t.cnic}</label>
+                <Input required value={formData.guarantor1.cnic} onChange={e => setFormData({...formData, guarantor1: {...formData.guarantor1, cnic: e.target.value}})} placeholder={t.cnicPlaceholder} />
               </div>
             </div>
 
             <div className="space-y-4">
-              <h4 className="text-sm font-bold text-indigo-600 uppercase">Guarantor 2</h4>
+              <h4 className="text-sm font-bold text-indigo-600 uppercase">{t.guarantor2}</h4>
               <div className="space-y-1">
-                <label className="text-xs font-bold text-gray-500 uppercase">Name</label>
-                <Input required value={formData.guarantor2.name} onChange={e => setFormData({...formData, guarantor2: {...formData.guarantor2, name: e.target.value}})} placeholder="Guarantor 2 Name" />
+                <label className="text-xs font-bold text-gray-500 uppercase">{t.name}</label>
+                <Input required value={formData.guarantor2.name} onChange={e => setFormData({...formData, guarantor2: {...formData.guarantor2, name: e.target.value}})} placeholder={t.guarantorNamePlaceholder} />
               </div>
               <div className="space-y-1">
-                <label className="text-xs font-bold text-gray-500 uppercase">Phone</label>
+                <label className="text-xs font-bold text-gray-500 uppercase">{t.phone}</label>
                 <Input 
                   required 
                   value={formData.guarantor2.phone} 
@@ -1741,28 +2035,28 @@ const CustomerModal = React.memo(({ customer, salespeople, onClose, onSuccess }:
                     if (!val.startsWith('+92')) val = '+92' + val.replace(/^\+?92?/, '');
                     setFormData({...formData, guarantor2: {...formData.guarantor2, phone: val}});
                   }} 
-                  placeholder="+92 3xx xxxxxxx" 
+                  placeholder={t.phonePlaceholder} 
                 />
               </div>
               <div className="space-y-1">
-                <label className="text-xs font-bold text-gray-500 uppercase">CNIC</label>
-                <Input required value={formData.guarantor2.cnic} onChange={e => setFormData({...formData, guarantor2: {...formData.guarantor2, cnic: e.target.value}})} placeholder="xxxxx-xxxxxxx-x" />
+                <label className="text-xs font-bold text-gray-500 uppercase">{t.cnic}</label>
+                <Input required value={formData.guarantor2.cnic} onChange={e => setFormData({...formData, guarantor2: {...formData.guarantor2, cnic: e.target.value}})} placeholder={t.cnicPlaceholder} />
               </div>
             </div>
           </div>
 
           <div className="space-y-1">
-            <label className="text-xs font-bold text-gray-500 uppercase">CNIC Photo</label>
+            <label className="text-xs font-bold text-gray-500 uppercase">{t.cnicPhoto}</label>
             <div className="flex flex-col gap-2">
               <div className="flex items-center gap-4">
                 <div className="flex-1 border-2 border-dashed border-slate-200 rounded-lg p-4 text-center hover:border-indigo-400 transition-colors cursor-pointer relative">
                   <input type="file" accept="image/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={e => setPhoto(e.target.files?.[0] || null)} />
                   <Camera className="w-6 h-6 text-gray-400 mx-auto mb-2" />
-                  <p className="text-xs text-gray-500">{photo ? photo.name : 'Click to upload photo'}</p>
+                  <p className="text-xs text-gray-500">{photo ? photo.name : t.clickToUpload}</p>
                 </div>
-                {(photo || customer?.cnicPhotoUrl) && (
+                {photoPreview && (
                   <div className="w-16 h-16 rounded-lg overflow-hidden border border-gray-200">
-                    <img src={photoPreview || customer?.cnicPhotoUrl} alt="" className="w-full h-full object-cover" />
+                    <img src={photoPreview} alt="" className="w-full h-full object-cover" />
                   </div>
                 )}
               </div>
@@ -1774,21 +2068,9 @@ const CustomerModal = React.memo(({ customer, salespeople, onClose, onSuccess }:
             </div>
           </div>
           <div className="pt-4 flex gap-3">
-            <Button type="button" variant="outline" className="flex-1" onClick={onClose} disabled={loading}>Cancel</Button>
-            <Button type="submit" className="flex-1 bg-indigo-600 hover:bg-indigo-700" disabled={loading}>
-              {loading ? (
-                <div className="flex items-center justify-center gap-2">
-                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
-                  {uploadProgress > 0 && uploadProgress < 100 ? `Uploading ${Math.round(uploadProgress)}%` : 'Saving...'}
-                </div>
-              ) : success ? (
-                <div className="flex items-center justify-center gap-2">
-                  <CheckCircle2 className="w-4 h-4" />
-                  Saved Successfully!
-                </div>
-              ) : (
-                customer ? 'Update Customer' : 'Add Customer'
-              )}
+            <Button type="button" variant="outline" className="flex-1" onClick={onClose} disabled={loading}>{t.cancel}</Button>
+            <Button type="submit" className="flex-1" disabled={loading}>
+              {loading ? t.saving : t.saveCustomer}
             </Button>
           </div>
         </form>
@@ -1797,7 +2079,7 @@ const CustomerModal = React.memo(({ customer, salespeople, onClose, onSuccess }:
   );
 });
 
-const InstallmentsView = React.memo(({ installments, customers, salespeople, payments, searchQuery, businessProfile }: { installments: Installment[]; customers: Customer[]; salespeople: Salesperson[]; payments: Payment[]; searchQuery: string; businessProfile: BusinessProfile | null }) => {
+const InstallmentsView = React.memo(({ installments, customers, salespeople, payments, searchQuery, businessProfile, t }: { installments: Installment[]; customers: Customer[]; salespeople: Salesperson[]; payments: Payment[]; searchQuery: string; businessProfile: BusinessProfile | null; t: any }) => {
   const [isAdding, setIsAdding] = useState(false);
   const [selectedInstallment, setSelectedInstallment] = useState<Installment | null>(null);
   const [installmentToDelete, setInstallmentToDelete] = useState<Installment | null>(null);
@@ -1833,10 +2115,10 @@ const InstallmentsView = React.memo(({ installments, customers, salespeople, pay
       className="space-y-6"
     >
       <div className="flex justify-between items-center">
-        <p className="text-sm text-gray-500">{filteredInstallments.length} Installments found</p>
+        <p className="text-sm text-gray-500">{filteredInstallments.length} {t.installmentsFound}</p>
         <Button onClick={() => setIsAdding(true)} className="gap-2">
           <Plus className="w-4 h-4" />
-          New Installment
+          {t.newInstallment}
         </Button>
       </div>
 
@@ -1855,10 +2137,10 @@ const InstallmentsView = React.memo(({ installments, customers, salespeople, pay
                   <div>
                     <h4 className="font-bold text-gray-900">{inst.productName}</h4>
                     <div className="flex items-center gap-2">
-                      <p className="text-sm text-gray-500">{customer?.name || 'Unknown Customer'}</p>
+                      <p className="text-sm text-gray-500">{customer?.name || t.unknownCustomer}</p>
                       {inst.salespersonId && (
                         <span className="text-[10px] bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded-md font-medium">
-                          Sold by: {salespeople.find(s => s.id === inst.salespersonId)?.name || 'Worker'}
+                          {t.soldBy}: {salespeople.find(s => s.id === inst.salespersonId)?.name || t.worker}
                         </span>
                       )}
                     </div>
@@ -1866,12 +2148,12 @@ const InstallmentsView = React.memo(({ installments, customers, salespeople, pay
                 </div>
                 <div className="flex items-center gap-6">
                   <div className="text-right">
-                    <p className="text-xs text-gray-400 uppercase font-bold">Remaining</p>
+                    <p className="text-xs text-gray-400 uppercase font-bold">{t.remaining}</p>
                     <p className="font-bold text-indigo-600">Rs. {inst.remainingBalance.toLocaleString()}</p>
                   </div>
                   <div className="w-32 hidden sm:block">
                     <div className="flex justify-between text-[10px] mb-1">
-                      <span>Progress</span>
+                      <span>{t.progress}</span>
                       <span>{Math.round(progress)}%</span>
                     </div>
                     <div className="h-1.5 w-full bg-gray-100 rounded-full overflow-hidden">
@@ -1886,7 +2168,7 @@ const InstallmentsView = React.memo(({ installments, customers, salespeople, pay
                         setInstallmentToDelete(inst);
                       }}
                       className="p-2 text-slate-400 md:text-slate-300 hover:text-rose-500 hover:bg-rose-50 rounded-lg transition-all md:opacity-0 md:group-hover:opacity-100"
-                      title="Delete Installment"
+                      title={t.deleteInstallment}
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -1905,6 +2187,7 @@ const InstallmentsView = React.memo(({ installments, customers, salespeople, pay
             customers={customers} 
             salespeople={salespeople}
             onClose={() => setIsAdding(false)} 
+            t={t}
           />
         )}
         {selectedInstallment && (
@@ -1915,14 +2198,16 @@ const InstallmentsView = React.memo(({ installments, customers, salespeople, pay
             payments={payments.filter(p => p.installmentId === selectedInstallment.id)}
             onClose={() => setSelectedInstallment(null)} 
             businessProfile={businessProfile}
+            t={t}
           />
         )}
         {installmentToDelete && (
           <DeleteConfirmModal 
-            title="Delete Installment"
-            message={`Are you sure you want to delete the installment record for ${installmentToDelete.productName}?`}
+            title={t.deleteInstallment}
+            message={`${t.deleteInstallmentConfirm} ${installmentToDelete.productName}?`}
             onConfirm={confirmDelete}
             onCancel={() => setInstallmentToDelete(null)}
+            t={t}
           />
         )}
       </AnimatePresence>
@@ -1930,7 +2215,7 @@ const InstallmentsView = React.memo(({ installments, customers, salespeople, pay
   );
 });
 
-const RemindersView = React.memo(({ installments, customers, businessProfile }: { installments: Installment[]; customers: Customer[]; businessProfile: BusinessProfile | null }) => {
+const RemindersView = React.memo(({ installments, customers, businessProfile, t }: { installments: Installment[]; customers: Customer[]; businessProfile: BusinessProfile | null; t: any }) => {
   const dueInstallments = useMemo(() => {
     const today = startOfDay(new Date());
     
@@ -1950,14 +2235,14 @@ const RemindersView = React.memo(({ installments, customers, businessProfile }: 
   const handleSendReminder = async (item: any) => {
     const message = `Assalam-o-Alaikum *${item.customer?.name}*,
   
-This is a friendly reminder from *${businessProfile?.businessName || "our shop"}* regarding your installment for *${item.productName}*.
+${t.reminderGreeting} *${businessProfile?.businessName || t.ourShop}* ${t.reminderRegarding} *${item.productName}*.
 
-*Due Date:* ${safeFormat(item.dueDate, 'PPP')}
-*Amount Due:* Rs. ${Math.round(item.monthlyInstallment).toLocaleString()}
-${item.daysRemaining < 0 ? `*Status:* Overdue by ${Math.abs(item.daysRemaining)} days` : item.daysRemaining === 0 ? `*Status:* Due Today` : `*Status:* Due in ${item.daysRemaining} days`}
+*${t.nextDue}:* ${safeFormat(item.dueDate, 'PPP')}
+*${t.amountDue}:* Rs. ${Math.round(item.monthlyInstallment).toLocaleString()}
+${item.daysRemaining < 0 ? `*${t.status}:* ${t.overdueBy} ${Math.abs(item.daysRemaining)} ${t.days}` : item.daysRemaining === 0 ? `*${t.status}:* ${t.dueToday}` : `*${t.status}:* ${t.dueIn} ${item.daysRemaining} ${t.days}`}
 
-Please ensure timely payment. Thank you!
-*${businessProfile?.ownerName || businessProfile?.businessName}*`;
+${t.reminderClosing}
+*${businessProfile?.ownerName || businessProfile?.businessName || t.owner}*`;
 
     const encodedMessage = encodeURIComponent(message);
     const phone = item.customer?.phone.replace(/[^0-9]/g, '');
@@ -1984,8 +2269,8 @@ Please ensure timely payment. Thank you!
           <Bell className="w-5 h-5 text-amber-600" />
         </div>
         <div>
-          <h2 className="text-xl font-bold">Payment Reminders</h2>
-          <p className="text-sm text-gray-500">Customers with installments due in the next 3 days or overdue.</p>
+          <h2 className="text-xl font-bold">{t.paymentReminders}</h2>
+          <p className="text-sm text-gray-500">{t.paymentRemindersDesc}</p>
         </div>
       </div>
 
@@ -2012,11 +2297,11 @@ Please ensure timely payment. Thank you!
                     "text-sm font-bold",
                     item.daysRemaining < 0 ? "text-rose-600" : "text-amber-600"
                   )}>
-                    {item.daysRemaining === 0 ? "Due Today" : 
-                     item.daysRemaining < 0 ? `Overdue by ${Math.abs(item.daysRemaining)} days` : 
-                     `Due in ${item.daysRemaining} days`}
+                    {item.daysRemaining === 0 ? t.dueToday : 
+                     item.daysRemaining < 0 ? `${t.overdueBy} ${Math.abs(item.daysRemaining)} ${t.days}` : 
+                     `${t.dueIn} ${item.daysRemaining} ${t.days}`}
                   </p>
-                  <p className="text-xs text-gray-400">Next Due: {safeFormat(item.dueDate, 'MMM dd, yyyy')}</p>
+                  <p className="text-xs text-gray-400">{t.nextDue}: {safeFormat(item.dueDate, 'MMM dd, yyyy')}</p>
                 </div>
                 
                 <Button 
@@ -2024,7 +2309,7 @@ Please ensure timely payment. Thank you!
                   className="bg-emerald-600 hover:bg-emerald-700 gap-2"
                 >
                   <MessageSquare className="w-4 h-4" />
-                  Send WhatsApp
+                  {t.sendWhatsApp}
                 </Button>
               </div>
             </div>
@@ -2034,8 +2319,8 @@ Please ensure timely payment. Thank you!
         {dueInstallments.length === 0 && (
           <div className="text-center py-20 bg-gray-50 rounded-3xl border-2 border-dashed border-gray-200">
             <CheckCircle2 className="w-12 h-12 text-emerald-500 mx-auto mb-4" />
-            <h3 className="text-lg font-bold text-gray-900">All caught up!</h3>
-            <p className="text-gray-500">No installments are due in the next 3 days.</p>
+            <h3 className="text-lg font-bold text-gray-900">{t.allCaughtUp}</h3>
+            <p className="text-gray-500">{t.noInstallmentsDue}</p>
           </div>
         )}
       </div>
@@ -2043,7 +2328,7 @@ Please ensure timely payment. Thank you!
   );
 });
 
-function SalespeopleView({ salespeople, installments, customers }: { salespeople: Salesperson[]; installments: Installment[]; customers: Customer[] }) {
+function SalespeopleView({ salespeople, installments, customers, t }: { salespeople: Salesperson[]; installments: Installment[]; customers: Customer[]; t: any }) {
   const [isAdding, setIsAdding] = useState(false);
   const [editingSalesperson, setEditingSalesperson] = useState<Salesperson | null>(null);
   const [viewingClients, setViewingClients] = useState<Salesperson | null>(null);
@@ -2068,13 +2353,13 @@ function SalespeopleView({ salespeople, installments, customers }: { salespeople
             <Users className="w-5 h-5 text-indigo-600" />
           </div>
           <div>
-            <h2 className="text-xl font-bold">Salespeople Management</h2>
-            <p className="text-sm text-gray-500">Manage your shop workers and track their sales performance.</p>
+            <h2 className="text-xl font-bold">{t.salespeopleManagement}</h2>
+            <p className="text-sm text-gray-500">{t.salespeopleManagementDesc}</p>
           </div>
         </div>
         <Button onClick={() => setIsAdding(true)} className="gap-2 bg-indigo-600 hover:bg-indigo-700">
           <Plus className="w-4 h-4" />
-          Add Salesperson
+          {t.addSalesperson}
         </Button>
       </div>
 
@@ -2082,24 +2367,24 @@ function SalespeopleView({ salespeople, installments, customers }: { salespeople
         {/* Self Stats */}
         <Card 
           className="p-6 border-l-4 border-l-slate-400 bg-slate-50/30 cursor-pointer hover:shadow-md transition-all"
-          onClick={() => setViewingClients({ id: "self", name: "Direct Sales (Self)", phone: "", userId: "", createdAt: null })}
+          onClick={() => setViewingClients({ id: "self", name: t.directSales, phone: "", userId: "", createdAt: null })}
         >
           <div className="flex items-start justify-between mb-4">
             <div className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center shadow-sm border border-slate-100">
               <Store className="w-6 h-6 text-slate-600" />
             </div>
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Owner (Self)</span>
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{t.ownerSelf}</span>
           </div>
-          <h3 className="text-lg font-bold text-slate-900 mb-1">Direct Sales</h3>
-          <p className="text-sm text-slate-500 mb-6">Sales made directly by you.</p>
+          <h3 className="text-lg font-bold text-slate-900 mb-1">{t.directSales}</h3>
+          <p className="text-sm text-slate-500 mb-6">{t.directSalesDesc}</p>
           
           <div className="grid grid-cols-2 gap-4">
             <div className="p-3 bg-white rounded-xl border border-slate-100">
-              <p className="text-[10px] text-slate-400 font-bold uppercase mb-1">Total Sold</p>
+              <p className="text-[10px] text-slate-400 font-bold uppercase mb-1">{t.totalSold}</p>
               <p className="text-sm font-bold">Rs. {installments.filter(i => !i.salespersonId).reduce((s, i) => s + i.totalPrice, 0).toLocaleString()}</p>
             </div>
             <div className="p-3 bg-white rounded-xl border border-slate-100">
-              <p className="text-[10px] text-slate-400 font-bold uppercase mb-1">Active Plans</p>
+              <p className="text-[10px] text-slate-400 font-bold uppercase mb-1">{t.activePlans}</p>
               <p className="text-sm font-bold">{installments.filter(i => !i.salespersonId && i.status === 'active').length}</p>
             </div>
           </div>
@@ -2114,8 +2399,14 @@ function SalespeopleView({ salespeople, installments, customers }: { salespeople
               onClick={() => setViewingClients(person)}
             >
               <div className="flex items-start justify-between mb-4">
-                <div className="w-12 h-12 bg-indigo-50 rounded-2xl flex items-center justify-center group-hover:bg-indigo-100 transition-colors">
-                  <Users className="w-6 h-6 text-indigo-600" />
+                <div className="w-12 h-12 rounded-full overflow-hidden bg-indigo-50 border border-indigo-100 flex-shrink-0">
+                  {person.photoUrl ? (
+                    <img src={person.photoUrl} alt="" className="w-full h-full object-cover" />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center text-indigo-600 font-bold text-lg">
+                      {person.name.charAt(0)}
+                    </div>
+                  )}
                 </div>
                 <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                   <Button 
@@ -2136,11 +2427,11 @@ function SalespeopleView({ salespeople, installments, customers }: { salespeople
               
               <div className="grid grid-cols-2 gap-4">
                 <div className="p-3 bg-indigo-50/50 rounded-xl border border-indigo-100/50">
-                  <p className="text-[10px] text-indigo-400 font-bold uppercase mb-1">Total Sold</p>
+                  <p className="text-[10px] text-indigo-400 font-bold uppercase mb-1">{t.totalSold}</p>
                   <p className="text-sm font-bold text-indigo-700">Rs. {stats.totalSales.toLocaleString()}</p>
                 </div>
                 <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
-                  <p className="text-[10px] text-slate-400 font-bold uppercase mb-1">Active Plans</p>
+                  <p className="text-[10px] text-slate-400 font-bold uppercase mb-1">{t.activePlans}</p>
                   <p className="text-sm font-bold text-slate-700">{stats.activeCount}</p>
                 </div>
               </div>
@@ -2156,6 +2447,7 @@ function SalespeopleView({ salespeople, installments, customers }: { salespeople
             setIsAdding(false);
             setEditingSalesperson(null);
           }} 
+          t={t}
         />
       )}
 
@@ -2165,17 +2457,19 @@ function SalespeopleView({ salespeople, installments, customers }: { salespeople
           customers={customers}
           installments={installments}
           onClose={() => setViewingClients(null)}
+          t={t}
         />
       )}
     </motion.div>
   );
 }
 
-function SalespersonClientsModal({ salesperson, customers, installments, onClose }: { 
+function SalespersonClientsModal({ salesperson, customers, installments, onClose, t }: { 
   salesperson: Salesperson; 
   customers: Customer[]; 
   installments: Installment[];
   onClose: () => void;
+  t: any;
 }) {
   const workerClients = customers.filter(c => 
     salesperson.id === 'self' ? !c.salespersonId : c.salespersonId === salesperson.id
@@ -2194,8 +2488,8 @@ function SalespersonClientsModal({ salesperson, customers, installments, onClose
               <Users className="w-5 h-5 text-indigo-600" />
             </div>
             <div>
-              <h3 className="text-xl font-bold">{salesperson.name}'s Clients</h3>
-              <p className="text-sm text-gray-500">{workerClients.length} customers assigned</p>
+              <h3 className="text-xl font-bold">{salesperson.name} {t.clients}</h3>
+              <p className="text-sm text-gray-500">{workerClients.length} {t.customersAssigned}</p>
             </div>
           </div>
           <Button variant="ghost" onClick={onClose} className="text-2xl">&times;</Button>
@@ -2205,7 +2499,7 @@ function SalespersonClientsModal({ salesperson, customers, installments, onClose
           {workerClients.length === 0 ? (
             <div className="text-center py-12 bg-white rounded-2xl border border-dashed border-slate-200">
               <Users className="w-12 h-12 text-slate-200 mx-auto mb-4" />
-              <p className="text-slate-400 font-medium">No clients found for this worker.</p>
+              <p className="text-slate-400 font-medium">{t.noClientsFound}</p>
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -2221,7 +2515,7 @@ function SalespersonClientsModal({ salesperson, customers, installments, onClose
                         <p className="text-xs text-slate-500">{customer.phone}</p>
                       </div>
                       <div className="px-2 py-1 bg-indigo-50 rounded text-[10px] font-bold text-indigo-600 uppercase">
-                        {activePlans} Active Plans
+                        {activePlans} {t.activePlans}
                       </div>
                     </div>
                     <div className="space-y-2">
@@ -2248,13 +2542,26 @@ function SalespersonClientsModal({ salesperson, customers, installments, onClose
   );
 }
 
-function SalespersonModal({ salesperson, onClose }: { salesperson: Salesperson | null; onClose: () => void }) {
+function SalespersonModal({ salesperson, onClose, t }: { salesperson: Salesperson | null; onClose: () => void; t: any }) {
   const [name, setName] = useState(salesperson?.name || "");
   const [phone, setPhone] = useState(salesperson?.phone || "+92");
+  const [photo, setPhoto] = useState<File | null>(null);
+  const [photoPreview, setPhotoPreview] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+
+  useEffect(() => {
+    if (salesperson?.photoUrl) setPhotoPreview(salesperson.photoUrl);
+  }, [salesperson]);
+
+  useEffect(() => {
+    if (!photo) return;
+    const objectUrl = URL.createObjectURL(photo);
+    setPhotoPreview(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [photo]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -2264,26 +2571,27 @@ function SalespersonModal({ salesperson, onClose }: { salesperson: Salesperson |
     setSuccess(false);
 
     try {
+      let photoUrl = salesperson?.photoUrl || "";
+      if (photo && navigator.onLine) {
+        const storageRef = ref(storage, `salespeople/${auth.currentUser.uid}/${Date.now()}_${photo.name}`);
+        await uploadBytes(storageRef, photo);
+        photoUrl = await getDownloadURL(storageRef);
+      }
+
       const data = {
         name,
         phone,
+        photoUrl,
         userId: auth.currentUser.uid,
         updatedAt: serverTimestamp(),
       };
 
-      // Optimistic save
       if (salesperson) {
-        updateDoc(doc(db, "salespeople", salesperson.id), data).catch(err => {
-          console.error("Background salesperson update failed", err);
-          handleFirestoreError(err, OperationType.UPDATE, "salespeople");
-        });
+        await updateDoc(doc(db, "salespeople", salesperson.id), data);
       } else {
-        addDoc(collection(db, "salespeople"), {
+        await addDoc(collection(db, "salespeople"), {
           ...data,
           createdAt: serverTimestamp(),
-        }).catch(err => {
-          console.error("Background salesperson add failed", err);
-          handleFirestoreError(err, OperationType.CREATE, "salespeople");
         });
       }
       
@@ -2323,70 +2631,103 @@ function SalespersonModal({ salesperson, onClose }: { salesperson: Salesperson |
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+    <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
       <motion.div 
-        initial={{ scale: 0.9, opacity: 0 }}
-        animate={{ scale: 1, opacity: 1 }}
+        initial={{ opacity: 0, scale: 0.95, y: 20 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
         className="bg-white rounded-2xl w-full max-w-md overflow-hidden shadow-2xl"
       >
-        <div className="p-6 border-b border-slate-100 flex items-center justify-between">
-          <h3 className="text-xl font-bold">{salesperson ? "Edit Salesperson" : "Add New Salesperson"}</h3>
-          <Button variant="ghost" onClick={onClose} disabled={loading}>&times;</Button>
+        <div className="p-6 border-b border-gray-100 flex items-center justify-between">
+          <h3 className="text-xl font-bold">{salesperson ? t.editWorker : t.addNewWorker}</h3>
+          <Button variant="ghost" onClick={onClose}>&times;</Button>
         </div>
         <form onSubmit={handleSubmit} className="p-6 space-y-4">
-          {error && (
-            <div className="p-3 bg-rose-50 border border-rose-100 text-rose-600 text-sm rounded-lg flex items-center gap-2">
-              <AlertCircle className="w-4 h-4" />
-              {error}
-            </div>
-          )}
-          {success && (
-            <div className="p-3 bg-emerald-50 border border-emerald-100 text-emerald-600 text-sm rounded-lg flex items-center gap-2">
-              <CheckCircle2 className="w-4 h-4" />
-              Salesperson saved successfully!
-            </div>
-          )}
-          <div className="space-y-1">
-            <label className="text-xs font-bold text-gray-500 uppercase">Full Name</label>
-            <Input required value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Ahmed Ali" />
-          </div>
-          <div className="space-y-1">
-            <label className="text-xs font-bold text-gray-500 uppercase">Phone Number</label>
-            <Input required value={phone} onChange={e => setPhone(e.target.value)} placeholder="+923001234567" />
-          </div>
+          {error && <div className="p-3 bg-rose-50 text-rose-600 text-sm rounded-lg">{error}</div>}
+          {success && <div className="p-3 bg-emerald-50 text-emerald-600 text-sm rounded-lg">{t.workerSaved}</div>}
           
+          <div className="flex justify-center mb-6">
+            <div className="w-24 h-24 rounded-full overflow-hidden border-2 border-dashed border-gray-200 flex items-center justify-center relative hover:border-indigo-400 transition-colors cursor-pointer">
+              <input type="file" accept="image/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={e => setPhoto(e.target.files?.[0] || null)} />
+              {photoPreview ? (
+                <img src={photoPreview} alt="" className="w-full h-full object-cover" />
+              ) : (
+                <Camera className="w-8 h-8 text-gray-400" />
+              )}
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <label className="text-xs font-bold text-gray-500 uppercase">{t.fullName}</label>
+            <Input required value={name} onChange={e => setName(e.target.value)} placeholder={t.fullNamePlaceholder} />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs font-bold text-gray-500 uppercase">{t.phone}</label>
+            <Input 
+              required 
+              value={phone} 
+              onChange={e => {
+                let val = e.target.value;
+                if (!val.startsWith('+92')) val = '+92' + val.replace(/^\+?92?/, '');
+                setPhone(val);
+              }} 
+              placeholder={t.phonePlaceholder} 
+            />
+          </div>
           <div className="pt-4 flex gap-3">
-            {salesperson && (
-              <Button type="button" variant="outline" className="text-rose-600 border-rose-100 hover:bg-rose-50" onClick={() => setShowDeleteConfirm(true)}>
-                <Trash2 className="w-4 h-4" />
-              </Button>
-            )}
-            <Button type="button" variant="outline" className="flex-1" onClick={onClose}>Cancel</Button>
-            <Button type="submit" className="flex-1 bg-indigo-600 hover:bg-indigo-700" disabled={loading}>
-              {loading ? "Saving..." : salesperson ? "Update" : "Add Salesperson"}
+            <Button type="button" variant="outline" className="flex-1" onClick={onClose} disabled={loading}>{t.cancel}</Button>
+            <Button type="submit" className="flex-1" disabled={loading}>
+              {loading ? t.saving : t.saveWorker}
             </Button>
           </div>
+          {salesperson && (
+            <Button 
+              type="button" 
+              variant="ghost" 
+              onClick={() => setShowDeleteConfirm(true)} 
+              className="w-full text-rose-600 hover:text-rose-700 hover:bg-rose-50"
+              disabled={loading}
+            >
+              <Trash2 className="w-4 h-4 mr-2" />
+              {t.deleteWorker}
+            </Button>
+          )}
         </form>
-      </motion.div>
 
-      {showDeleteConfirm && (
-        <DeleteConfirmModal 
-          title="Delete Salesperson?"
-          message="This will remove the salesperson profile. Existing sales records will remain but will no longer be linked to this profile."
-          onConfirm={handleDelete}
-          onCancel={() => setShowDeleteConfirm(false)}
-        />
-      )}
+        <AnimatePresence>
+          {showDeleteConfirm && (
+            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[110] flex items-center justify-center p-4">
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="bg-white rounded-2xl p-6 max-w-sm w-full shadow-2xl"
+              >
+                <h4 className="text-lg font-bold mb-2">{t.deleteWorker}?</h4>
+                <p className="text-slate-600 text-sm mb-6">
+                  {t.deleteWorkerConfirm} {salesperson?.name}?
+                </p>
+                <div className="flex gap-3">
+                  <Button variant="outline" className="flex-1" onClick={() => setShowDeleteConfirm(false)}>{t.cancel}</Button>
+                  <Button variant="danger" className="flex-1" onClick={handleDelete} disabled={loading}>
+                    {loading ? t.deleting : t.delete}
+                  </Button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+      </motion.div>
     </div>
   );
 }
 
-const InstallmentModal = React.memo(({ customers, salespeople, onClose, initialCustomerId, initialSalespersonId }: { 
+const InstallmentModal = React.memo(({ customers, salespeople, onClose, initialCustomerId, initialSalespersonId, t }: { 
   customers: Customer[]; 
   salespeople: Salesperson[]; 
   onClose: () => void;
   initialCustomerId?: string;
   initialSalespersonId?: string;
+  t: any;
 }) => {
   const [formData, setFormData] = useState({
     customerId: initialCustomerId || "",
@@ -2482,7 +2823,7 @@ const InstallmentModal = React.memo(({ customers, salespeople, onClose, initialC
         className="bg-white rounded-2xl w-full max-w-2xl overflow-hidden shadow-2xl my-auto"
       >
         <div className="p-6 border-b border-gray-100 flex items-center justify-between">
-          <h3 className="text-xl font-bold">New Installment Plan</h3>
+          <h3 className="text-xl font-bold">{t.newInstallmentPlan}</h3>
           <Button variant="ghost" onClick={onClose}>&times;</Button>
         </div>
         <form onSubmit={handleSubmit} className="p-6">
@@ -2495,58 +2836,58 @@ const InstallmentModal = React.memo(({ customers, salespeople, onClose, initialC
           <div className="grid md:grid-cols-2 gap-6">
             <div className="space-y-4">
               <div className="space-y-1">
-                <label className="text-xs font-bold text-gray-500 uppercase">Select Customer</label>
+                <label className="text-xs font-bold text-gray-500 uppercase">{t.selectCustomer}</label>
                 <select 
                   className="flex h-10 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   value={formData.customerId}
                   onChange={e => setFormData({...formData, customerId: e.target.value})}
                   required
                 >
-                  <option value="">Choose a customer...</option>
+                  <option value="">{t.chooseCustomer}</option>
                   {customers.map(c => (
                     <option key={c.id} value={c.id}>{c.name}</option>
                   ))}
                 </select>
               </div>
               <div className="space-y-1">
-                <label className="text-xs font-bold text-gray-500 uppercase">Salesperson (Worker)</label>
+                <label className="text-xs font-bold text-gray-500 uppercase">{t.salespersonWorker}</label>
                 <select 
                   className="flex h-10 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   value={formData.salespersonId}
                   onChange={e => setFormData({...formData, salespersonId: e.target.value})}
                 >
-                  <option value="">Direct Sale (Owner)</option>
+                  <option value="">{t.directSaleOwner}</option>
                   {salespeople.map(s => (
                     <option key={s.id} value={s.id}>{s.name}</option>
                   ))}
                 </select>
               </div>
               <div className="space-y-1">
-                <label className="text-xs font-bold text-gray-500 uppercase">Product Name</label>
+                <label className="text-xs font-bold text-gray-500 uppercase">{t.productName}</label>
                 <Input 
                   required 
                   value={formData.productName} 
                   onChange={e => setFormData({...formData, productName: e.target.value})} 
-                  placeholder="e.g. Mobile, Washing Machine, Laptop" 
+                  placeholder={t.productPlaceholder} 
                 />
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1">
-                  <label className="text-xs font-bold text-gray-500 uppercase">Brand</label>
+                  <label className="text-xs font-bold text-gray-500 uppercase">{t.brand}</label>
                   <Input 
                     required 
                     value={formData.brand} 
                     onChange={e => setFormData({...formData, brand: e.target.value})} 
-                    placeholder="e.g. Samsung, LG" 
+                    placeholder={t.brandPlaceholder} 
                   />
                 </div>
                 <div className="space-y-1">
-                  <label className="text-xs font-bold text-gray-500 uppercase">Model</label>
+                  <label className="text-xs font-bold text-gray-500 uppercase">{t.model}</label>
                   <Input 
                     required 
                     value={formData.model} 
                     onChange={e => setFormData({...formData, model: e.target.value})} 
-                    placeholder="e.g. S24 Ultra, 8kg Front Load" 
+                    placeholder={t.modelPlaceholder} 
                   />
                 </div>
               </div>
@@ -2556,84 +2897,84 @@ const InstallmentModal = React.memo(({ customers, salespeople, onClose, initialC
                   animate={{ height: 'auto', opacity: 1 }}
                   className="space-y-1"
                 >
-                  <label className="text-xs font-bold text-gray-500 uppercase">IMEI Number</label>
+                  <label className="text-xs font-bold text-gray-500 uppercase">{t.imeiNumber}</label>
                   <Input 
                     value={formData.imei} 
                     onChange={e => setFormData({...formData, imei: e.target.value})} 
-                    placeholder="15-digit IMEI number" 
+                    placeholder={t.imeiPlaceholder} 
                     className="border-indigo-200 focus:ring-indigo-500"
                   />
                 </motion.div>
               )}
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1">
-                  <label className="text-xs font-bold text-gray-500 uppercase">Total Price (Rs)</label>
+                  <label className="text-xs font-bold text-gray-500 uppercase">{t.totalPriceRs}</label>
                   <Input type="number" required value={formData.totalPrice} onChange={e => setFormData({...formData, totalPrice: Number(e.target.value)})} />
                 </div>
                 <div className="space-y-1">
-                  <label className="text-xs font-bold text-gray-500 uppercase">Advance (Rs)</label>
+                  <label className="text-xs font-bold text-gray-500 uppercase">{t.advanceRs}</label>
                   <Input type="number" required value={formData.advancePayment} onChange={e => setFormData({...formData, advancePayment: Number(e.target.value)})} />
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1">
-                  <label className="text-xs font-bold text-gray-500 uppercase">Duration (Months)</label>
+                  <label className="text-xs font-bold text-gray-500 uppercase">{t.durationMonths}</label>
                   <Input type="number" required value={formData.duration} onChange={e => setFormData({...formData, duration: Number(e.target.value)})} />
                 </div>
                 <div className="space-y-1">
-                  <label className="text-xs font-bold text-gray-500 uppercase">Profit (%)</label>
+                  <label className="text-xs font-bold text-gray-500 uppercase">{t.profitPercentage}</label>
                   <Input type="number" required value={formData.profitPercentage} onChange={e => setFormData({...formData, profitPercentage: Number(e.target.value)})} />
                 </div>
               </div>
               <div className="space-y-1">
-                <label className="text-xs font-bold text-gray-500 uppercase">Form Charges (Rs)</label>
+                <label className="text-xs font-bold text-gray-500 uppercase">{t.formChargesRs}</label>
                 <Input 
                   type="number" 
                   value={formData.formCharges || ""} 
                   onChange={e => setFormData({...formData, formCharges: Number(e.target.value)})} 
-                  placeholder="Enter form charges (e.g. 500, 1000)"
+                  placeholder={t.formChargesPlaceholder}
                 />
               </div>
             </div>
 
             <div className="bg-gray-50 rounded-xl p-6 space-y-4">
-              <h4 className="font-bold text-sm text-gray-400 uppercase">Summary</h4>
+              <h4 className="font-bold text-sm text-gray-400 uppercase">{t.summary}</h4>
               <div className="space-y-2">
                 <div className="flex justify-between">
-                  <span className="text-sm text-gray-600">Total Payable:</span>
+                  <span className="text-sm text-gray-600">{t.totalPayable}:</span>
                   <span className="font-bold">Rs. {calculations.totalPayable.toLocaleString()}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-sm text-gray-600">Monthly Installment:</span>
+                  <span className="text-sm text-gray-600">{t.monthlyInstallment}:</span>
                   <span className="font-bold text-indigo-600">Rs. {Math.round(calculations.monthlyInstallment).toLocaleString()}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-sm text-gray-600">Remaining Balance:</span>
+                  <span className="text-sm text-gray-600">{t.remainingBalance}:</span>
                   <span className="font-bold">Rs. {calculations.remainingBalance.toLocaleString()}</span>
                 </div>
               </div>
               <div className="pt-4 border-t border-gray-200">
                 <p className="text-[10px] text-gray-400 leading-relaxed">
-                  * Monthly installment is calculated by adding profit to the total price, subtracting the advance payment, and dividing by the duration.
+                  * {t.installmentCalculationNote}
                 </p>
               </div>
             </div>
           </div>
           <div className="pt-8 flex gap-3">
-            <Button type="button" variant="outline" className="flex-1" onClick={onClose} disabled={loading}>Cancel</Button>
+            <Button type="button" variant="outline" className="flex-1" onClick={onClose} disabled={loading}>{t.cancel}</Button>
             <Button type="submit" className="flex-1 bg-indigo-600 hover:bg-indigo-700" disabled={loading}>
               {loading ? (
                 <div className="flex items-center justify-center gap-2">
                   <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
-                  Saving...
+                  {t.saving}
                 </div>
               ) : success ? (
                 <div className="flex items-center justify-center gap-2">
                   <CheckCircle2 className="w-4 h-4" />
-                  Saved Successfully!
+                  {t.savedSuccessfully}
                 </div>
               ) : (
-                "Create Plan"
+                t.createPlan
               )}
             </Button>
           </div>
@@ -2643,7 +2984,7 @@ const InstallmentModal = React.memo(({ customers, salespeople, onClose, initialC
   );
 });
 
-function InstallmentDetailsModal({ installment, customer, salespeople, payments, onClose, businessProfile }: { installment: Installment; customer: Customer; salespeople: Salesperson[]; payments: Payment[]; onClose: () => void; businessProfile: BusinessProfile | null }) {
+function InstallmentDetailsModal({ installment, customer, salespeople, payments, onClose, businessProfile, t }: { installment: Installment; customer: Customer; salespeople: Salesperson[]; payments: Payment[]; onClose: () => void; businessProfile: BusinessProfile | null; t: any }) {
   const [isPaying, setIsPaying] = useState(false);
   const [paymentAmount, setPaymentAmount] = useState(Math.round(installment.monthlyInstallment));
   const [loading, setLoading] = useState(false);
@@ -2703,9 +3044,9 @@ function InstallmentDetailsModal({ installment, customer, salespeople, payments,
     
     const doc = new jsPDF();
     const isSlip = !!payment;
-    const title = isSlip ? "PAYMENT RECEIPT" : "ACCOUNT STATEMENT";
-    const businessName = businessProfile?.businessName.toUpperCase() || "SMART INSTALLMENT MANAGER";
-    const tagline = businessProfile?.tagline || "Quality Products on Easy Installments";
+    const title = isSlip ? t.paymentReceipt : t.accountStatement;
+    const businessName = businessProfile?.businessName.toUpperCase() || t.businessNamePlaceholder;
+    const tagline = businessProfile?.tagline || t.taglinePlaceholder;
     const receiptNo = payment ? `REC-${payment.id.substring(0, 8).toUpperCase()}` : `STMT-${installment.id.substring(0, 8).toUpperCase()}`;
     
     // --- Colors & Styles ---
@@ -2734,11 +3075,11 @@ function InstallmentDetailsModal({ installment, customer, salespeople, payments,
     
     doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
     doc.setFontSize(9);
-    doc.text(`Receipt #: ${receiptNo}`, 140, 30);
+    doc.text(`${t.receiptNo}: ${receiptNo}`, 140, 30);
     
     const displayDate = toDate(payment?.paymentDate || payment?.createdAt);
       
-    doc.text(`Date: ${format(displayDate, 'PPP')}`, 140, 35);
+    doc.text(`${t.date}: ${format(displayDate, 'PPP')}`, 140, 35);
 
     // Horizontal Line
     doc.setDrawColor(226, 232, 240); // Slate 200
@@ -2749,7 +3090,7 @@ function InstallmentDetailsModal({ installment, customer, salespeople, payments,
     // Customer Details
     doc.setFontSize(10);
     doc.setTextColor(100, 116, 139);
-    doc.text("BILL TO:", 20, 55);
+    doc.text(t.billTo + ":", 20, 55);
     
     doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
     doc.setFont("helvetica", "bold");
@@ -2758,13 +3099,13 @@ function InstallmentDetailsModal({ installment, customer, salespeople, payments,
     
     doc.setFont("helvetica", "normal");
     doc.setFontSize(9);
-    doc.text(`Phone: ${customer.phone}`, 20, 68);
-    doc.text(`CNIC: ${customer.cnic}`, 20, 73);
-    doc.text(`Address: ${customer.address}`, 20, 78);
+    doc.text(`${t.phone}: ${customer.phone}`, 20, 68);
+    doc.text(`${t.cnic}: ${customer.cnic}`, 20, 73);
+    doc.text(`${t.address}: ${customer.address}`, 20, 78);
     
     // Product Details
     doc.setTextColor(100, 116, 139);
-    doc.text("PRODUCT DETAILS:", 120, 55);
+    doc.text(t.productDetails + ":", 120, 55);
     
     doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
     doc.setFont("helvetica", "bold");
@@ -2773,26 +3114,26 @@ function InstallmentDetailsModal({ installment, customer, salespeople, payments,
     
     doc.setFont("helvetica", "normal");
     doc.setFontSize(9);
-    doc.text(`Product: ${installment.productName}`, 120, 68);
-    if (installment.imei) doc.text(`IMEI: ${installment.imei}`, 120, 73);
-    doc.text(`Plan Duration: ${installment.duration} Months`, 120, 78);
+    doc.text(`${t.product}: ${installment.productName}`, 120, 68);
+    if (installment.imei) doc.text(`${t.imei}: ${installment.imei}`, 120, 73);
+    doc.text(`${t.planDuration}: ${installment.duration} ${t.months}`, 120, 78);
     
     const salesperson = salespeople.find(s => s.id === installment.salespersonId);
     doc.setFont("helvetica", "bold");
     doc.setTextColor(accentColor[0], accentColor[1], accentColor[2]);
-    doc.text(`Dealt By: ${salesperson ? salesperson.name : "Shop Owner"}`, 120, 83);
+    doc.text(`${t.dealtBy}: ${salesperson ? salesperson.name : t.shopOwner}`, 120, 83);
     
     doc.setFont("helvetica", "normal");
     doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
     // Hide form charges from the total shown to customer if requested
     const displayTotal = installment.totalPayable - (installment.formCharges || 0);
-    doc.text(`Total Payable: Rs. ${displayTotal.toLocaleString()}`, 120, 88);
+    doc.text(`${t.totalPayable}: Rs. ${displayTotal.toLocaleString()}`, 120, 88);
     
     doc.setFont("helvetica", "bold");
     doc.setTextColor(accentColor[0], accentColor[1], accentColor[2]);
     
     const displayRemaining = installment.remainingBalance - (installment.formCharges || 0);
-    doc.text(`Remaining: Rs. ${Math.max(0, displayRemaining).toLocaleString()}`, 120, 93);
+    doc.text(`${t.remaining}: Rs. ${Math.max(0, displayRemaining).toLocaleString()}`, 120, 93);
 
     // --- Payment Table ---
     const tablePayments = payment ? [payment] : [...payments].sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
@@ -2800,12 +3141,12 @@ function InstallmentDetailsModal({ installment, customer, salespeople, payments,
       payment ? "1" : (index + 1).toString(),
       safeFormat(p.paymentDate, 'MMM dd, yyyy'),
       `Rs. ${p.amount.toLocaleString()}`,
-      "Payment Received"
+      t.paymentReceived
     ]);
 
     autoTable(doc, {
       startY: 95,
-      head: [['Sr#', 'Transaction Date', 'Amount', 'Description']],
+      head: [[t.srNo, t.transactionDate, t.amount, t.description]],
       body: tableData,
       headStyles: { 
         fillColor: [241, 245, 249], 
@@ -2835,7 +3176,7 @@ function InstallmentDetailsModal({ installment, customer, salespeople, payments,
     doc.setFontSize(9);
     doc.setTextColor(100, 116, 139);
     
-    doc.text("Total Amount Paid:", summaryX, finalY + 15);
+    doc.text(t.totalAmountPaid + ":", summaryX, finalY + 15);
     doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
     doc.text(`Rs. ${(installment.totalPayable - installment.remainingBalance).toLocaleString()}`, 190, finalY + 15, { align: "right" });
     
@@ -2844,7 +3185,7 @@ function InstallmentDetailsModal({ installment, customer, salespeople, payments,
     
     doc.setFont("helvetica", "bold");
     doc.setTextColor(accentColor[0], accentColor[1], accentColor[2]);
-    doc.text("Remaining Balance:", summaryX, finalY + 25);
+    doc.text(t.remainingBalance + ":", summaryX, finalY + 25);
     const displayRemainingSummary = Math.max(0, installment.remainingBalance - (installment.formCharges || 0));
     doc.text(`Rs. ${displayRemainingSummary.toLocaleString()}`, 190, finalY + 25, { align: "right" });
     
@@ -2867,12 +3208,12 @@ function InstallmentDetailsModal({ installment, customer, salespeople, payments,
     // Signature Area
     doc.setDrawColor(203, 213, 225);
     doc.line(140, footerY + 25, 190, footerY + 25);
-    doc.text("Authorized Signature", 165, footerY + 30, { align: "center" });
+    doc.text(`${t.authorizedSignature}`, 165, footerY + 30, { align: "center" });
     
     // Watermark/System Info
     doc.setFontSize(7);
     doc.setTextColor(203, 213, 225);
-    doc.text(`Generated by Smart Installment Manager • ${format(new Date(), 'PPP p')}`, 105, 285, { align: "center" });
+    doc.text(`${t.generatedBy} • ${format(new Date(), 'PPP p')}`, 105, 285, { align: "center" });
     
     const fileName = isSlip 
       ? `Slip_${customer.name.replace(/\s+/g, '_')}_${format(displayDate, 'yyyyMMdd')}.pdf`
@@ -2930,50 +3271,50 @@ function InstallmentDetailsModal({ installment, customer, salespeople, payments,
           )}
           <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
             <div className="p-4 bg-gray-50 rounded-xl">
-              <p className="text-[10px] text-gray-400 uppercase font-bold mb-1">Total Price</p>
+              <p className="text-[10px] text-gray-400 uppercase font-bold mb-1">{t.totalPrice}</p>
               <p className="font-bold">Rs. {installment.totalPrice.toLocaleString()}</p>
             </div>
             <div className="p-4 bg-gray-50 rounded-xl">
-              <p className="text-[10px] text-gray-400 uppercase font-bold mb-1">Advance</p>
+              <p className="text-[10px] text-gray-400 uppercase font-bold mb-1">{t.advance}</p>
               <p className="font-bold">Rs. {installment.advancePayment.toLocaleString()}</p>
             </div>
             <div className="p-4 bg-indigo-50 rounded-xl">
-              <p className="text-[10px] text-indigo-400 uppercase font-bold mb-1">Monthly</p>
+              <p className="text-[10px] text-indigo-400 uppercase font-bold mb-1">{t.monthly}</p>
               <p className="font-bold text-indigo-600">Rs. {Math.round(installment.monthlyInstallment).toLocaleString()}</p>
             </div>
             <div className="p-4 bg-orange-50 rounded-xl">
-              <p className="text-[10px] text-orange-400 uppercase font-bold mb-1">Remaining</p>
+              <p className="text-[10px] text-orange-400 uppercase font-bold mb-1">{t.remaining}</p>
               <p className="font-bold text-orange-600">Rs. {installment.remainingBalance.toLocaleString()}</p>
             </div>
             {installment.imei && (
               <div className="p-4 bg-slate-50 rounded-xl">
-                <p className="text-[10px] text-gray-400 uppercase font-bold mb-1">IMEI</p>
+                <p className="text-[10px] text-gray-400 uppercase font-bold mb-1">{t.imei}</p>
                 <p className="font-bold truncate">{installment.imei}</p>
               </div>
             )}
             {installment.salespersonId && (
               <div className="p-4 bg-indigo-50/30 rounded-xl border border-indigo-100/50">
-                <p className="text-[10px] text-indigo-400 uppercase font-bold mb-1">Salesperson</p>
-                <p className="font-bold text-indigo-700 truncate">{salespeople.find(s => s.id === installment.salespersonId)?.name || 'Worker'}</p>
+                <p className="text-[10px] text-indigo-400 uppercase font-bold mb-1">{t.salesperson}</p>
+                <p className="font-bold text-indigo-700 truncate">{salespeople.find(s => s.id === installment.salespersonId)?.name || t.worker}</p>
               </div>
             )}
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="p-4 border border-slate-100 rounded-xl space-y-3">
-              <h4 className="text-xs font-bold text-gray-400 uppercase">Guarantor 1</h4>
+              <h4 className="text-xs font-bold text-gray-400 uppercase">{t.guarantor1}</h4>
               <div>
-                <p className="text-sm font-bold">{customer.guarantor1?.name || 'N/A'}</p>
-                <p className="text-xs text-gray-500">{customer.guarantor1?.phone || 'N/A'}</p>
-                <p className="text-xs text-gray-500">CNIC: {customer.guarantor1?.cnic || 'N/A'}</p>
+                <p className="text-sm font-bold">{customer.guarantor1?.name || t.na}</p>
+                <p className="text-xs text-gray-500">{customer.guarantor1?.phone || t.na}</p>
+                <p className="text-xs text-gray-500">{t.cnic}: {customer.guarantor1?.cnic || t.na}</p>
               </div>
             </div>
             <div className="p-4 border border-slate-100 rounded-xl space-y-3">
-              <h4 className="text-xs font-bold text-gray-400 uppercase">Guarantor 2</h4>
+              <h4 className="text-xs font-bold text-gray-400 uppercase">{t.guarantor2}</h4>
               <div>
-                <p className="text-sm font-bold">{customer.guarantor2?.name || 'N/A'}</p>
-                <p className="text-xs text-gray-500">{customer.guarantor2?.phone || 'N/A'}</p>
-                <p className="text-xs text-gray-500">CNIC: {customer.guarantor2?.cnic || 'N/A'}</p>
+                <p className="text-sm font-bold">{customer.guarantor2?.name || t.na}</p>
+                <p className="text-xs text-gray-500">{customer.guarantor2?.phone || t.na}</p>
+                <p className="text-xs text-gray-500">{t.cnic}: {customer.guarantor2?.cnic || t.na}</p>
               </div>
             </div>
           </div>
@@ -2982,17 +3323,17 @@ function InstallmentDetailsModal({ installment, customer, salespeople, payments,
             <div className="flex items-center justify-between">
               <h4 className="font-bold flex items-center gap-2">
                 <div className="w-5 h-5 bg-green-100 text-green-700 rounded flex items-center justify-center text-[10px] font-bold">Rs</div>
-                Payment History
+                {t.paymentHistory}
               </h4>
               <div className="flex gap-2">
                 <Button variant="outline" size="sm" className="gap-2" onClick={() => generateReceipt()}>
                   <Share2 className="w-4 h-4" />
-                  Share Statement
+                  {t.shareStatement}
                 </Button>
                 {installment.status === 'active' && (
                   <Button size="sm" className="gap-2" onClick={() => setIsPaying(true)}>
                     <Plus className="w-4 h-4" />
-                    Add Payment
+                    {t.addPayment}
                   </Button>
                 )}
               </div>
@@ -3002,9 +3343,9 @@ function InstallmentDetailsModal({ installment, customer, salespeople, payments,
               <table className="w-full text-left text-sm">
                 <thead className="bg-gray-50 border-b border-gray-100">
                   <tr>
-                    <th className="px-4 py-3 font-bold text-gray-500">Date</th>
-                    <th className="px-4 py-3 font-bold text-gray-500">Amount</th>
-                    <th className="px-4 py-3 font-bold text-gray-500 text-right">Action</th>
+                    <th className="px-4 py-3 font-bold text-gray-500">{t.date}</th>
+                    <th className="px-4 py-3 font-bold text-gray-500">{t.amount}</th>
+                    <th className="px-4 py-3 font-bold text-gray-500 text-right">{t.action}</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-50">
@@ -3023,18 +3364,18 @@ function InstallmentDetailsModal({ installment, customer, salespeople, payments,
                           <button 
                             className="p-2 text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors flex items-center gap-2"
                             onClick={() => generateReceipt(p, false)}
-                            title="Share PDF Receipt"
+                            title={t.sharePdfReceipt}
                           >
                             <Share2 className="w-4 h-4" />
-                            <span className="text-xs hidden sm:inline">Share</span>
+                            <span className="text-xs hidden sm:inline">{t.share}</span>
                           </button>
                           <button 
                             className="p-2 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors flex items-center gap-2"
                             onClick={() => generateReceipt(p, true)}
-                            title="Download PDF Receipt"
+                            title={t.downloadPdfReceipt}
                           >
                             <Download className="w-4 h-4" />
-                            <span className="text-xs hidden sm:inline">Download</span>
+                            <span className="text-xs hidden sm:inline">{t.download}</span>
                           </button>
                         </div>
                       </td>
@@ -3042,7 +3383,7 @@ function InstallmentDetailsModal({ installment, customer, salespeople, payments,
                   ))}
                   {payments.length === 0 && (
                     <tr>
-                      <td colSpan={3} className="px-4 py-8 text-center text-gray-400">No payments recorded yet</td>
+                      <td colSpan={3} className="px-4 py-8 text-center text-gray-400">{t.noPaymentsRecorded}</td>
                     </tr>
                   )}
                 </tbody>
@@ -3055,23 +3396,23 @@ function InstallmentDetailsModal({ installment, customer, salespeople, payments,
           <div className="p-6 bg-gray-50 border-t border-gray-100 animate-in slide-in-from-bottom-4">
             <div className="flex items-end gap-4 max-w-md mx-auto">
               <div className="flex-1 space-y-1">
-                <label className="text-xs font-bold text-gray-500 uppercase">Payment Amount (Rs)</label>
+                <label className="text-xs font-bold text-gray-500 uppercase">{t.paymentAmountRs}</label>
                 <Input type="number" value={paymentAmount} onChange={e => setPaymentAmount(Number(e.target.value))} />
               </div>
               <div className="flex gap-2">
-                <Button variant="outline" onClick={() => setIsPaying(false)}>Cancel</Button>
+                <Button variant="outline" onClick={() => setIsPaying(false)}>{t.cancel}</Button>
                 <Button onClick={handlePayment} disabled={loading} className="bg-indigo-600 hover:bg-indigo-700 min-w-[100px]">
                   {loading ? (
                     <div className="flex items-center gap-2">
                       <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
-                      Saving...
+                      {t.saving}
                     </div>
                   ) : success ? (
                     <div className="flex items-center gap-2">
                       <CheckCircle2 className="w-3 h-3" />
-                      Success
+                      {t.success}
                     </div>
-                  ) : 'Confirm'}
+                  ) : t.confirm}
                 </Button>
               </div>
             </div>
@@ -3082,11 +3423,12 @@ function InstallmentDetailsModal({ installment, customer, salespeople, payments,
   );
 }
 
-function TrashView({ customers, salespeople, installments, payments }: { 
+function TrashView({ customers, salespeople, installments, payments, t }: { 
   customers: Customer[]; 
   salespeople: Salesperson[]; 
   installments: Installment[];
   payments: Payment[];
+  t: any;
 }) {
   const [loading, setLoading] = useState<string | null>(null);
 
@@ -3153,9 +3495,21 @@ function TrashView({ customers, salespeople, installments, payments }: {
   };
 
   const handlePermanentDelete = async (id: string, collectionName: string) => {
-    if (!confirm("Are you sure? This action cannot be undone.")) return;
+    if (!confirm(t.permanentDeleteConfirm)) return;
     setLoading(id);
     try {
+      if (collectionName === "customers") {
+        // Delete associated installments and payments first
+        const customerInstallments = installments.filter(i => i.customerId === id);
+        for (const inst of customerInstallments) {
+          const instPayments = payments.filter(p => p.installmentId === inst.id);
+          for (const pay of instPayments) {
+            await deleteDoc(doc(db, "payments", pay.id));
+          }
+          await deleteDoc(doc(db, "installments", inst.id));
+        }
+      }
+      
       await deleteDoc(doc(db, collectionName, id));
     } catch (err) {
       console.error(`Failed to permanently delete from ${collectionName}:`, err);
@@ -3173,9 +3527,9 @@ function TrashView({ customers, salespeople, installments, payments }: {
       <div className="bg-amber-50 border border-amber-100 p-4 rounded-xl flex items-start gap-3">
         <AlertCircle className="w-5 h-5 text-amber-600 mt-0.5" />
         <div>
-          <h4 className="font-bold text-amber-900 text-sm">Recycle Bin</h4>
+          <h4 className="font-bold text-amber-900 text-sm">{t.recycleBin}</h4>
           <p className="text-amber-700 text-xs mt-1">
-            Items in the trash will be automatically removed after 30 days. You can restore them anytime before then.
+            {t.recycleBinDesc}
           </p>
         </div>
       </div>
@@ -3184,7 +3538,7 @@ function TrashView({ customers, salespeople, installments, payments }: {
         <section>
           <h3 className="text-lg font-bold text-slate-800 mb-4 flex items-center gap-2">
             <Users className="w-5 h-5 text-indigo-600" />
-            Deleted Customers ({validTrashCustomers.length})
+            {t.deletedCustomers} ({validTrashCustomers.length})
           </h3>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {validTrashCustomers.map(customer => (
@@ -3192,7 +3546,7 @@ function TrashView({ customers, salespeople, installments, payments }: {
                 <div className="flex justify-between items-start mb-2">
                   <div>
                     <h4 className="font-bold text-slate-900">{customer.name}</h4>
-                    <p className="text-xs text-slate-500">Deleted: {safeFormat(customer.deletedAt, 'PPP')}</p>
+                    <p className="text-xs text-slate-500">{t.deleted}: {safeFormat(customer.deletedAt, 'PPP')}</p>
                   </div>
                   <div className="flex gap-2">
                     <Button 
@@ -3201,6 +3555,7 @@ function TrashView({ customers, salespeople, installments, payments }: {
                       className="h-8 w-8 p-0 text-emerald-600 hover:bg-emerald-50"
                       onClick={() => handleRestoreCustomer(customer)}
                       disabled={!!loading}
+                      title={t.restore}
                     >
                       <RotateCcw className="w-4 h-4" />
                     </Button>
@@ -3210,6 +3565,7 @@ function TrashView({ customers, salespeople, installments, payments }: {
                       className="h-8 w-8 p-0 text-rose-600 hover:bg-rose-50"
                       onClick={() => handlePermanentDelete(customer.id, "customers")}
                       disabled={!!loading}
+                      title={t.permanentDelete}
                     >
                       <Trash2 className="w-4 h-4" />
                     </Button>
@@ -3219,7 +3575,7 @@ function TrashView({ customers, salespeople, installments, payments }: {
             ))}
             {validTrashCustomers.length === 0 && (
               <div className="col-span-full py-12 text-center bg-slate-50 rounded-2xl border border-dashed border-slate-200">
-                <p className="text-slate-400 text-sm">No deleted customers found.</p>
+                <p className="text-slate-400 text-sm">{t.noDeletedCustomers}</p>
               </div>
             )}
           </div>
@@ -3227,8 +3583,8 @@ function TrashView({ customers, salespeople, installments, payments }: {
 
         <section>
           <h3 className="text-lg font-bold text-slate-800 mb-4 flex items-center gap-2">
-            <Users className="w-5 h-5 text-indigo-600" />
-            Deleted Salespeople ({validTrashSalespeople.length})
+            <Store className="w-5 h-5 text-indigo-600" />
+            {t.deletedWorkers} ({validTrashSalespeople.length})
           </h3>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {validTrashSalespeople.map(person => (
@@ -3236,7 +3592,7 @@ function TrashView({ customers, salespeople, installments, payments }: {
                 <div className="flex justify-between items-start mb-2">
                   <div>
                     <h4 className="font-bold text-slate-900">{person.name}</h4>
-                    <p className="text-xs text-slate-500">Deleted: {safeFormat(person.deletedAt, 'PPP')}</p>
+                    <p className="text-xs text-slate-500">{t.deleted}: {safeFormat(person.deletedAt, 'PPP')}</p>
                   </div>
                   <div className="flex gap-2">
                     <Button 
@@ -3245,6 +3601,7 @@ function TrashView({ customers, salespeople, installments, payments }: {
                       className="h-8 w-8 p-0 text-emerald-600 hover:bg-emerald-50"
                       onClick={() => handleRestoreSalesperson(person)}
                       disabled={!!loading}
+                      title={t.restore}
                     >
                       <RotateCcw className="w-4 h-4" />
                     </Button>
@@ -3254,6 +3611,7 @@ function TrashView({ customers, salespeople, installments, payments }: {
                       className="h-8 w-8 p-0 text-rose-600 hover:bg-rose-50"
                       onClick={() => handlePermanentDelete(person.id, "salespeople")}
                       disabled={!!loading}
+                      title={t.permanentDelete}
                     >
                       <Trash2 className="w-4 h-4" />
                     </Button>
@@ -3263,7 +3621,7 @@ function TrashView({ customers, salespeople, installments, payments }: {
             ))}
             {validTrashSalespeople.length === 0 && (
               <div className="col-span-full py-12 text-center bg-slate-50 rounded-2xl border border-dashed border-slate-200">
-                <p className="text-slate-400 text-sm">No deleted salespeople found.</p>
+                <p className="text-slate-400 text-sm">{t.noDeletedWorkers}</p>
               </div>
             )}
           </div>
