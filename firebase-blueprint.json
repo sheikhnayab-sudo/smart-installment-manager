@@ -1,0 +1,117 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "A user of the application.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "The unique ID of the user." },
+        "email": { "type": "string", "format": "email", "description": "The email of the user." },
+        "displayName": { "type": "string", "description": "The display name of the user." },
+        "role": { "type": "string", "enum": ["admin", "manager"], "description": "The role of the user." },
+        "hasProfile": { "type": "boolean", "description": "Whether the user has completed their business profile." }
+      },
+      "required": ["uid", "email"]
+    },
+    "BusinessProfile": {
+      "title": "Business Profile",
+      "description": "The business profile for a user.",
+      "type": "object",
+      "properties": {
+        "businessName": { "type": "string", "description": "The name of the business." },
+        "ownerName": { "type": "string", "description": "The name of the business owner." },
+        "phone": { "type": "string", "description": "The contact phone number." },
+        "address": { "type": "string", "description": "The business address." },
+        "tagline": { "type": "string", "description": "A short tagline or description." },
+        "logoUrl": { "type": "string", "format": "uri", "description": "The URL of the business logo." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "The timestamp when the profile was last updated." }
+      },
+      "required": ["businessName", "ownerName", "phone", "address"]
+    },
+    "Guarantor": {
+      "title": "Guarantor",
+      "description": "A guarantor for a customer.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "The name of the guarantor." },
+        "phone": { "type": "string", "description": "The phone number of the guarantor." },
+        "cnic": { "type": "string", "description": "The CNIC number of the guarantor." }
+      },
+      "required": ["name", "phone", "cnic"]
+    },
+    "Customer": {
+      "title": "Customer",
+      "description": "A customer who has installments.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "The name of the customer." },
+        "phone": { "type": "string", "description": "The phone number of the customer." },
+        "cnic": { "type": "string", "description": "The CNIC number of the customer." },
+        "address": { "type": "string", "description": "The address of the customer." },
+        "cnicPhotoUrl": { "type": "string", "format": "uri", "description": "The URL of the CNIC photo." },
+        "guarantor1": { "$ref": "Guarantor", "description": "The first guarantor." },
+        "guarantor2": { "$ref": "Guarantor", "description": "The second guarantor." },
+        "userId": { "type": "string", "description": "The UID of the user who owns this customer record." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "The timestamp when the customer was created." }
+      },
+      "required": ["name", "phone", "cnic", "guarantor1", "guarantor2", "userId", "createdAt"]
+    },
+    "Installment": {
+      "title": "Installment",
+      "description": "An installment plan for a product.",
+      "type": "object",
+      "properties": {
+        "customerId": { "type": "string", "description": "The ID of the customer." },
+        "productName": { "type": "string", "description": "The name of the product." },
+        "imei": { "type": "string", "description": "The IMEI number of the product (optional)." },
+        "totalPrice": { "type": "number", "description": "The total price of the product." },
+        "advancePayment": { "type": "number", "description": "The advance payment made." },
+        "duration": { "type": "integer", "description": "The duration of the installment plan in months." },
+        "profitPercentage": { "type": "number", "description": "The profit percentage." },
+        "monthlyInstallment": { "type": "number", "description": "The monthly installment amount." },
+        "remainingBalance": { "type": "number", "description": "The remaining balance." },
+        "totalPayable": { "type": "number", "description": "The total payable amount." },
+        "status": { "type": "string", "enum": ["active", "completed", "defaulted"], "description": "The status of the installment plan." },
+        "userId": { "type": "string", "description": "The UID of the user who owns this installment plan." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "The timestamp when the installment was created." }
+      },
+      "required": ["customerId", "productName", "totalPrice", "advancePayment", "duration", "profitPercentage", "monthlyInstallment", "remainingBalance", "totalPayable", "status", "userId", "createdAt"]
+    },
+    "Payment": {
+      "title": "Payment",
+      "description": "A payment made for an installment.",
+      "type": "object",
+      "properties": {
+        "installmentId": { "type": "string", "description": "The ID of the installment." },
+        "amount": { "type": "number", "description": "The amount paid." },
+        "paymentDate": { "type": "string", "format": "date-time", "description": "The date of the payment." },
+        "receiptUrl": { "type": "string", "format": "uri", "description": "The URL of the payment receipt." },
+        "userId": { "type": "string", "description": "The UID of the user who recorded this payment." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "The timestamp when the payment was recorded." }
+      },
+      "required": ["installmentId", "amount", "paymentDate", "userId", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": {
+      "schema": "User",
+      "description": "User profiles."
+    },
+    "/profiles/{uid}": {
+      "schema": "BusinessProfile",
+      "description": "Business profiles for multi-tenancy."
+    },
+    "/customers/{customerId}": {
+      "schema": "Customer",
+      "description": "Customer records."
+    },
+    "/installments/{installmentId}": {
+      "schema": "Installment",
+      "description": "Installment plan records."
+    },
+    "/payments/{paymentId}": {
+      "schema": "Payment",
+      "description": "Payment records."
+    }
+  }
+}

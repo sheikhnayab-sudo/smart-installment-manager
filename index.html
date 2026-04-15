@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <script>
+      // Fix for "Cannot set property fetch of #<Window> which has only a getter"
+      // This happens when libraries try to overwrite window.fetch in protected environments
+      (function() {
+        try {
+          const originalFetch = window.fetch;
+          if (originalFetch) {
+            let currentFetch = originalFetch;
+            try {
+              Object.defineProperty(window, 'fetch', {
+                get: function() { return currentFetch; },
+                set: function(v) { 
+                  console.warn('window.fetch was overwritten');
+                  currentFetch = v; 
+                },
+                configurable: true,
+                enumerable: true
+              });
+            } catch (e) {
+              // If redefinition fails, we try to at least make it writable if it was just a value
+              try {
+                Object.defineProperty(window, 'fetch', {
+                  value: originalFetch,
+                  writable: true,
+                  configurable: true,
+                  enumerable: true
+                });
+              } catch (e2) {
+                console.warn('Could not make fetch writable:', e2);
+              }
+            }
+          }
+        } catch (e) {
+          console.warn('Fetch fix error:', e);
+        }
+      })();
+    </script>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Smart Installment Manager</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 rx=%2220%22 fill=%22%234f46e5%22/><path d=%22M30 30h40v40h-40z%22 fill=%22none%22 stroke=%22white%22 stroke-width=%228%22/><path d=%22M30 50h40M50 30v40%22 stroke=%22white%22 stroke-width=%228%22 stroke-linecap=%22round%22/></svg>">
+    <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 rx=%2220%22 fill=%22%234f46e5%22/><path d=%22M30 30h40v40h-40z%22 fill=%22none%22 stroke=%22white%22 stroke-width=%228%22/><path d=%22M30 50h40M50 30v40%22 stroke=%22white%22 stroke-width=%228%22 stroke-linecap=%22round%22/></svg>">
+    <meta name="theme-color" content="#4f46e5">
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
