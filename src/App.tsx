@@ -9,11 +9,7 @@ import {
   signInWithPopup, 
   GoogleAuthProvider, 
   signOut, 
-  User as FirebaseUser,
-  RecaptchaVerifier,
-  signInWithPhoneNumber,
-  linkWithPopup,
-  ConfirmationResult
+  User as FirebaseUser
 } from "firebase/auth";
 import { 
   collection, 
@@ -84,11 +80,52 @@ const safeFormat = (date: any, formatStr: string) => {
   return format(toDate(date), formatStr);
 };
 
-const withTimeout = <T,>(promise: Promise<T>, timeoutMs: number = 30000): Promise<T> => {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) => setTimeout(() => reject(new Error("Operation timed out. Please check your internet connection and try again.")), timeoutMs))
-  ]);
+const fileToBase64 = async (file: File, maxWidth: number = 400, quality: number = 0.4): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    // Use a small delay to prevent UI freezing on mobile
+    setTimeout(() => {
+      const img = new Image();
+      const objectUrl = URL.createObjectURL(file);
+      
+      img.src = objectUrl;
+      img.onload = () => {
+        URL.revokeObjectURL(objectUrl);
+        const canvas = document.createElement('canvas');
+        let width = img.width;
+        let height = img.height;
+
+        if (width > maxWidth) {
+          height = (maxWidth / width) * height;
+          width = maxWidth;
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        
+        if (ctx) {
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = 'medium';
+          ctx.drawImage(img, 0, 0, width, height);
+        }
+
+        const base64 = canvas.toDataURL('image/jpeg', quality);
+        resolve(base64);
+      };
+      img.onerror = (err) => {
+        URL.revokeObjectURL(objectUrl);
+        reject(err);
+      };
+    }, 100);
+  });
+};
+
+const withTimeout = <T,>(promise: Promise<T>, timeoutMs: number = 180000): Promise<T> => {
+  let timeoutId: any;
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error("Operation timed out. Please check your internet connection and try again.")), timeoutMs);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timeoutId));
 };
 
 // --- Types ---
@@ -362,6 +399,7 @@ function ProfileSetup({ user, onComplete, onLogout, t }: { user: FirebaseUser; o
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!navigator.onLine) return setError("No internet connection. Please check your network.");
     setLoading(true);
     setError(null);
     try {
@@ -373,7 +411,7 @@ function ProfileSetup({ user, onComplete, onLogout, t }: { user: FirebaseUser; o
         ...formData,
         phone,
         updatedAt: serverTimestamp(),
-      }), 30000);
+      }));
       onComplete();
     } catch (err: any) {
       console.error("Profile setup failed", err);
@@ -535,56 +573,7 @@ const Card = ({ children, className, onClick }: { children: React.ReactNode; cla
 );
 
 const Login = ({ onLogin, error, t, lang, setLang }: { onLogin: () => void; error: string | null; t: any; lang: Language; setLang: (l: Language) => void }) => {
-  const [phone, setPhone] = useState("");
-  const [otp, setOtp] = useState("");
-  const [step, setStep] = useState<'phone' | 'otp'>('phone');
-  const [confirmationResult, setConfirmationResult] = useState<ConfirmationResult | null>(null);
   const [loading, setLoading] = useState(false);
-  const [localError, setLocalError] = useState<string | null>(null);
-
-  const setupRecaptcha = () => {
-    if (!(window as any).recaptchaVerifier) {
-      (window as any).recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
-        'size': 'invisible'
-      });
-    }
-  };
-
-  const handlePhoneLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (phone.startsWith("+972")) {
-      return setLocalError("Phone login is not available for this region.");
-    }
-    setLoading(true);
-    setLocalError(null);
-    try {
-      setupRecaptcha();
-      const verifier = (window as any).recaptchaVerifier;
-      const result = await signInWithPhoneNumber(auth, phone, verifier);
-      setConfirmationResult(result);
-      setStep('otp');
-    } catch (err: any) {
-      console.error("Phone login failed", err);
-      setLocalError(err.message || "Failed to send OTP.");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleVerifyOTP = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!confirmationResult) return;
-    setLoading(true);
-    setLocalError(null);
-    try {
-      await confirmationResult.confirm(otp);
-    } catch (err: any) {
-      console.error("OTP verification failed", err);
-      setLocalError("Invalid OTP. Please try again.");
-    } finally {
-      setLoading(false);
-    }
-  };
 
   return (
     <div className="h-full flex flex-col items-center justify-center bg-gray-50 p-4">
@@ -612,62 +601,37 @@ const Login = ({ onLogin, error, t, lang, setLang }: { onLogin: () => void; erro
         <h1 className="text-2xl font-bold text-gray-900 mb-2">{t.appName}</h1>
         <p className="text-gray-600 mb-8">{t.loginDesc}</p>
         
-        {(error || localError) && (
+        {error && (
           <div className="mb-6 p-4 bg-rose-50 border border-rose-100 text-rose-600 rounded-xl text-sm flex items-center gap-3 text-left">
             <AlertCircle className="w-5 h-5 flex-shrink-0" />
-            <p>{error || localError}</p>
+            <p>{error}</p>
           </div>
         )}
 
         <div className="space-y-4">
-          {step === 'phone' ? (
-            <form onSubmit={handlePhoneLogin} className="space-y-4">
-              <div className="text-left">
-                <label className="block text-xs font-medium text-gray-500 mb-1 uppercase tracking-wider">{t.enterPhone}</label>
-                <Input 
-                  type="tel" 
-                  placeholder={t.phonePlaceholder} 
-                  value={phone} 
-                  onChange={(e) => setPhone(e.target.value)}
-                  required
-                />
-              </div>
-              <Button type="submit" className="w-full py-6" disabled={loading}>
-                {loading ? t.saving : t.sendOTP}
-              </Button>
-              <div className="relative my-6">
-                <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-gray-200"></div></div>
-                <div className="relative flex justify-center text-xs uppercase"><span className="bg-white px-2 text-gray-400">{t.or}</span></div>
-              </div>
-              <Button onClick={(e) => { e.preventDefault(); onLogin(); }} variant="outline" className="w-full py-6 flex items-center justify-center gap-2">
-                <img src="https://www.google.com/favicon.ico" className="w-4 h-4" alt="" />
-                {t.loginWithGoogle}
-              </Button>
-            </form>
-          ) : (
-            <form onSubmit={handleVerifyOTP} className="space-y-4">
-              <div className="text-left">
-                <label className="block text-xs font-medium text-gray-500 mb-1 uppercase tracking-wider">{t.enterOTP}</label>
-                <Input 
-                  type="text" 
-                  placeholder="123456" 
-                  value={otp} 
-                  onChange={(e) => setOtp(e.target.value)}
-                  required
-                />
-              </div>
-              <Button type="submit" className="w-full py-6" disabled={loading}>
-                {loading ? t.saving : t.verifyOTP}
-              </Button>
-              <Button onClick={() => setStep('phone')} variant="ghost" className="w-full">
-                {t.cancel}
-              </Button>
-            </form>
-          )}
+          <Button 
+            onClick={async (e) => { 
+              e.preventDefault(); 
+              setLoading(true);
+              try {
+                await onLogin();
+              } finally {
+                setLoading(false);
+              }
+            }} 
+            disabled={loading}
+            variant="outline" 
+            className="w-full py-6 flex items-center justify-center gap-2"
+          >
+            {loading ? (
+              <div className="w-5 h-5 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>
+            ) : (
+              <img src="https://www.google.com/favicon.ico" className="w-4 h-4" alt="" />
+            )}
+            {t.loginWithGoogle}
+          </Button>
         </div>
         
-        <div id="recaptcha-container"></div>
-
         <p className="mt-6 text-xs text-gray-400">
           {t.termsPrivacy}
         </p>
@@ -705,29 +669,6 @@ export default function App() {
   const [installments, setInstallments] = useState<Installment[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
   const [salespeople, setSalespeople] = useState<Salesperson[]>([]);
-  const [showBackupPrompt, setShowBackupPrompt] = useState(false);
-
-  useEffect(() => {
-    if (user && user.phoneNumber && !user.email) {
-      const dismissed = localStorage.getItem('backup_prompt_dismissed');
-      if (!dismissed) {
-        setShowBackupPrompt(true);
-      }
-    } else {
-      setShowBackupPrompt(false);
-    }
-  }, [user]);
-
-  const handleLinkGmail = async () => {
-    const provider = new GoogleAuthProvider();
-    try {
-      await linkWithPopup(user!, provider);
-      setShowBackupPrompt(false);
-    } catch (error: any) {
-      console.error("Linking failed", error);
-      alert("Failed to link Gmail: " + error.message);
-    }
-  };
 
   const activeCustomers = useMemo(() => customers.filter(c => !c.isDeleted), [customers]);
   const activeInstallments = useMemo(() => {
@@ -794,7 +735,7 @@ export default function App() {
           // Then fetch from server if online
           if (navigator.onLine) {
             try {
-              const docSnap = await withTimeout(getDoc(profileDoc), 30000);
+              const docSnap = await withTimeout(getDoc(profileDoc));
               if (docSnap.exists()) {
                 setBusinessProfile(docSnap.data() as BusinessProfile);
               }
@@ -1105,38 +1046,14 @@ export default function App() {
               </select>
               <div className="md:hidden flex items-center gap-2">
                 <img src={user.photoURL || `https://ui-avatars.com/api/?name=${user.displayName || user.phoneNumber || 'User'}`} alt="" className="w-8 h-8 rounded-full" referrerPolicy="no-referrer" />
-                <Button variant="ghost" size="sm" onClick={handleLogout} className="p-1 text-rose-600">
-                  <LogOut className="w-5 h-5" />
+                <Button variant="danger" size="sm" onClick={handleLogout} className="px-3 py-1 text-xs flex items-center gap-1">
+                  <LogOut className="w-3 h-3" />
+                  {t.logout}
                 </Button>
               </div>
             </div>
           </div>
         </header>
-
-        {showBackupPrompt && (
-          <div className="m-4 md:mx-8 p-4 bg-indigo-600 text-white rounded-2xl shadow-lg shadow-indigo-200 flex flex-col sm:flex-row items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center flex-shrink-0">
-                <Share2 className="w-5 h-5" />
-              </div>
-              <div>
-                <h4 className="font-bold text-sm">{t.linkGmail}</h4>
-                <p className="text-xs text-indigo-100">{t.gmailBackupInfo}</p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2 w-full sm:w-auto">
-              <Button onClick={handleLinkGmail} size="sm" className="bg-white text-indigo-600 hover:bg-indigo-50 flex-1 sm:flex-none">
-                {t.linkNow}
-              </Button>
-              <Button onClick={() => {
-                localStorage.setItem('backup_prompt_dismissed', 'true');
-                setShowBackupPrompt(false);
-              }} variant="ghost" size="sm" className="text-white hover:bg-white/10 flex-1 sm:flex-none">
-                {t.later}
-              </Button>
-            </div>
-          </div>
-        )}
 
         <div className="p-4 md:p-8 max-w-7xl mx-auto">
           <AnimatePresence mode="wait">
@@ -1151,6 +1068,7 @@ export default function App() {
                 onAddInstallment={() => setIsAddingInstallment(true)}
                 businessProfile={businessProfile}
                 onNavigate={setActiveTab}
+                onLogout={handleLogout}
                 t={t}
               />
             )}
@@ -1274,7 +1192,7 @@ function NavButton({ active, onClick, icon, label, badge }: { active: boolean; o
   );
 }
 
-const DashboardView = React.memo(({ customers, installments, payments, salespeople, onAddCustomer, onAddInstallment, businessProfile, onNavigate, t }: { 
+const DashboardView = React.memo(({ customers, installments, payments, salespeople, onAddCustomer, onAddInstallment, businessProfile, onNavigate, onLogout, t }: { 
   customers: Customer[]; 
   installments: Installment[]; 
   payments: Payment[];
@@ -1283,6 +1201,7 @@ const DashboardView = React.memo(({ customers, installments, payments, salespeop
   onAddInstallment: () => void;
   businessProfile: BusinessProfile | null;
   onNavigate: (tab: any) => void;
+  onLogout: () => void;
   t: any;
 }) => {
   const stats = useMemo(() => {
@@ -1332,6 +1251,9 @@ const DashboardView = React.memo(({ customers, installments, payments, salespeop
           <Button onClick={onAddInstallment} variant="outline" className="gap-2 border-indigo-200 text-indigo-600 hover:bg-indigo-50">
             <CreditCard className="w-4 h-4" />
             {t.newPlan}
+          </Button>
+          <Button onClick={onLogout} variant="ghost" className="md:hidden text-rose-600 hover:bg-rose-50">
+            <LogOut className="w-4 h-4" />
           </Button>
         </div>
       </div>
@@ -1487,6 +1409,7 @@ const SettingsView = React.memo(({ profile, user, t }: { profile: BusinessProfil
   const [photo, setPhoto] = useState<File | null>(null);
   const [photoPreview, setPhotoPreview] = useState<string | null>(profile?.logoUrl || null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
@@ -1498,24 +1421,33 @@ const SettingsView = React.memo(({ profile, user, t }: { profile: BusinessProfil
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!navigator.onLine) {
+      setError("No internet connection. Please check your network.");
+      setLoading(false);
+      return;
+    }
     setLoading(true);
+    setError(null);
     try {
       let logoUrl = profile?.logoUrl || "";
-      if (photo && navigator.onLine) {
-        const storageRef = ref(storage, `profiles/${user.uid}/logo_${Date.now()}`);
-        await uploadBytes(storageRef, photo);
-        logoUrl = await getDownloadURL(storageRef);
+      if (photo) {
+        logoUrl = await fileToBase64(photo);
       }
 
-      await setDoc(doc(db, "profiles", user.uid), {
+      // Optimistic update
+      setDoc(doc(db, "profiles", user.uid), {
         ...formData,
         logoUrl,
         updatedAt: serverTimestamp(),
+      }).catch(err => {
+        console.error("Background profile update failed", err);
       });
+
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
-    } catch (error) {
-      console.error("Profile update failed", error);
+    } catch (err: any) {
+      console.error("Profile update failed", err);
+      setError(err.message || "Failed to update profile. Please try again.");
     } finally {
       setLoading(false);
     }
@@ -1540,6 +1472,7 @@ const SettingsView = React.memo(({ profile, user, t }: { profile: BusinessProfil
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-6">
+          {error && <div className="p-3 bg-rose-50 text-rose-600 text-sm rounded-lg">{error}</div>}
           <div className="flex justify-center mb-6">
             <div className="w-24 h-24 rounded-2xl overflow-hidden border-2 border-dashed border-gray-200 flex items-center justify-center relative hover:border-indigo-400 transition-colors cursor-pointer">
               <input type="file" accept="image/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={e => setPhoto(e.target.files?.[0] || null)} />
@@ -1806,7 +1739,7 @@ const CustomerModal = React.memo(({ customer, salespeople, onClose, onSuccess, t
   const [profilePhoto, setProfilePhoto] = useState<File | null>(null);
   const [profilePhotoPreview, setProfilePhotoPreview] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
 
@@ -1829,52 +1762,35 @@ const CustomerModal = React.memo(({ customer, salespeople, onClose, onSuccess, t
     return () => URL.revokeObjectURL(objectUrl);
   }, [profilePhoto]);
 
-  const uploadFile = async (file: File, path: string): Promise<string> => {
-    const storageRef = ref(storage, `${path}/${auth.currentUser!.uid}/${Date.now()}_${file.name}`);
-    const uploadTask = uploadBytesResumable(storageRef, file);
-    
-    return new Promise((resolve, reject) => {
-      uploadTask.on('state_changed', 
-        (snapshot) => {
-          const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
-          setUploadProgress(progress);
-        }, 
-        (error) => {
-          console.error("Upload failed:", error);
-          reject(error);
-        }, 
-        async () => {
-          try {
-            const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
-            resolve(downloadURL);
-          } catch (err) {
-            reject(err);
-          }
-        }
-      );
-    });
-  };
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!auth.currentUser) return setError("User not authenticated.");
+    if (!navigator.onLine) return setError("No internet connection. Please check your network.");
     
     setLoading(true);
     setError(null);
     setSuccess(false);
+    setStatusMessage(t.saving || "Saving...");
     
     try {
       let cnicPhotoUrl = customer?.cnicPhotoUrl || "";
       let photoUrl = customer?.photoUrl || "";
       
-      if (photo && navigator.onLine) {
-        cnicPhotoUrl = await withTimeout(uploadFile(photo, 'cnics'), 60000);
+      if (photo) {
+        setStatusMessage("Processing CNIC...");
+        cnicPhotoUrl = await fileToBase64(photo);
+        // Small delay to let UI update
+        await new Promise(r => setTimeout(r, 200));
       }
       
-      if (profilePhoto && navigator.onLine) {
-        photoUrl = await withTimeout(uploadFile(profilePhoto, 'customers'), 60000);
+      if (profilePhoto) {
+        setStatusMessage("Processing Profile Photo...");
+        photoUrl = await fileToBase64(profilePhoto);
+        // Small delay to let UI update
+        await new Promise(r => setTimeout(r, 200));
       }
 
+      setStatusMessage("Saving data...");
       const data = {
         ...formData,
         cnicPhotoUrl,
@@ -1884,20 +1800,33 @@ const CustomerModal = React.memo(({ customer, salespeople, onClose, onSuccess, t
       };
 
       if (customer) {
-        await updateDoc(doc(db, "customers", customer.id), data);
+        // Optimistic update
+        updateDoc(doc(db, "customers", customer.id), data).catch(err => {
+          console.error("Background customer update failed", err);
+        });
       } else {
-        await addDoc(collection(db, "customers"), {
+        // Optimistic add with pre-generated ID
+        const newDocRef = doc(collection(db, "customers"));
+        const newId = newDocRef.id;
+        
+        setDoc(newDocRef, {
           ...data,
           createdAt: serverTimestamp(),
+        }).catch(err => {
+          console.error("Background customer add failed", err);
         });
+        
+        if (onSuccess) onSuccess(newId);
       }
       
+      setStatusMessage(null);
       setSuccess(true);
-      setTimeout(() => onClose(), 1500);
+      setLoading(false);
+      setTimeout(() => onClose(), 1000);
     } catch (err: any) {
       console.error("Error saving customer:", err);
       setError(err.message || "Failed to save customer.");
-    } finally {
+      setStatusMessage(null);
       setLoading(false);
     }
   };
@@ -1925,6 +1854,15 @@ const CustomerModal = React.memo(({ customer, salespeople, onClose, onSuccess, t
             <div className="p-3 bg-emerald-50 border border-emerald-100 text-emerald-600 text-sm rounded-lg flex items-center gap-2">
               <CheckCircle2 className="w-4 h-4" />
               {t.customerSaved}
+            </div>
+          )}
+
+          {statusMessage && !error && !success && (
+            <div className="p-3 bg-indigo-50 border border-indigo-100 text-indigo-600 text-sm rounded-lg flex flex-col gap-2">
+              <div className="flex items-center gap-2">
+                <div className="w-4 h-4 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>
+                {statusMessage}
+              </div>
             </div>
           )}
 
@@ -2060,11 +1998,6 @@ const CustomerModal = React.memo(({ customer, salespeople, onClose, onSuccess, t
                   </div>
                 )}
               </div>
-              {loading && uploadProgress > 0 && uploadProgress < 100 && (
-                <div className="w-full bg-gray-100 rounded-full h-1.5">
-                  <div className="bg-indigo-600 h-1.5 rounded-full transition-all duration-300" style={{ width: `${uploadProgress}%` }}></div>
-                </div>
-              )}
             </div>
           </div>
           <div className="pt-4 flex gap-3">
@@ -2548,6 +2481,7 @@ function SalespersonModal({ salesperson, onClose, t }: { salesperson: Salesperso
   const [photo, setPhoto] = useState<File | null>(null);
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -2566,16 +2500,20 @@ function SalespersonModal({ salesperson, onClose, t }: { salesperson: Salesperso
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!auth.currentUser) return;
+    if (!navigator.onLine) return setError("No internet connection. Please check your network.");
+    
     setLoading(true);
     setError(null);
     setSuccess(false);
+    setStatusMessage(t.saving || "Saving...");
 
     try {
       let photoUrl = salesperson?.photoUrl || "";
-      if (photo && navigator.onLine) {
-        const storageRef = ref(storage, `salespeople/${auth.currentUser.uid}/${Date.now()}_${photo.name}`);
-        await uploadBytes(storageRef, photo);
-        photoUrl = await getDownloadURL(storageRef);
+      if (photo) {
+        setStatusMessage("Processing photo...");
+        photoUrl = await fileToBase64(photo);
+        // Small delay to let UI update
+        await new Promise(r => setTimeout(r, 200));
       }
 
       const data = {
@@ -2586,15 +2524,23 @@ function SalespersonModal({ salesperson, onClose, t }: { salesperson: Salesperso
         updatedAt: serverTimestamp(),
       };
 
+      setStatusMessage("Saving data...");
       if (salesperson) {
-        await updateDoc(doc(db, "salespeople", salesperson.id), data);
+        // Optimistic update
+        updateDoc(doc(db, "salespeople", salesperson.id), data).catch(err => {
+          console.error("Background salesperson update failed", err);
+        });
       } else {
-        await addDoc(collection(db, "salespeople"), {
+        // Optimistic add
+        addDoc(collection(db, "salespeople"), {
           ...data,
           createdAt: serverTimestamp(),
+        }).catch(err => {
+          console.error("Background salesperson add failed", err);
         });
       }
       
+      setStatusMessage(null);
       setSuccess(true);
       setLoading(false);
       setTimeout(() => {
@@ -2603,6 +2549,7 @@ function SalespersonModal({ salesperson, onClose, t }: { salesperson: Salesperso
     } catch (err: any) {
       console.error("Error saving salesperson", err);
       setError(err.message || "Failed to save salesperson. Please try again.");
+      setStatusMessage(null);
       setLoading(false);
     }
   };
@@ -2644,6 +2591,15 @@ function SalespersonModal({ salesperson, onClose, t }: { salesperson: Salesperso
         <form onSubmit={handleSubmit} className="p-6 space-y-4">
           {error && <div className="p-3 bg-rose-50 text-rose-600 text-sm rounded-lg">{error}</div>}
           {success && <div className="p-3 bg-emerald-50 text-emerald-600 text-sm rounded-lg">{t.workerSaved}</div>}
+          
+          {statusMessage && !error && !success && (
+            <div className="p-3 bg-indigo-50 border border-indigo-100 text-indigo-600 text-sm rounded-lg flex flex-col gap-2">
+              <div className="flex items-center gap-2">
+                <div className="w-4 h-4 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>
+                {statusMessage}
+              </div>
+            </div>
+          )}
           
           <div className="flex justify-center mb-6">
             <div className="w-24 h-24 rounded-full overflow-hidden border-2 border-dashed border-gray-200 flex items-center justify-center relative hover:border-indigo-400 transition-colors cursor-pointer">
