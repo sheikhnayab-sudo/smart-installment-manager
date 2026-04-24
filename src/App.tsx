@@ -434,16 +434,19 @@ function ProfileSetup({ user, onComplete, onLogout, t, setLocalProfile }: { user
         updatedAt: serverTimestamp(),
       };
 
-      // 1. Optimistic write to Firestore
-      setDoc(doc(db, "businesses", user.uid), setupData).catch(err => {
-        console.error("Delayed profile setup write error", err?.message || String(err));
-      });
-      
-      // 2. Update local state immediately so user gets into dashboard
-      setLocalProfile(setupData as BusinessProfile);
-      
-      // 3. Close setup
-      onComplete();
+      // 1. Write to Firestore and wait for it
+      try {
+        await setDoc(doc(db, "businesses", user.uid), setupData);
+        
+        // 2. Update local state immediately
+        setLocalProfile(setupData as BusinessProfile);
+        
+        // 3. Close setup
+        onComplete();
+      } catch (err: any) {
+        console.error("Profile setup write error", err?.message || String(err));
+        setError("Failed to save profile. Please check your internet connection.");
+      }
     } catch (err: any) {
       console.error("Profile setup failed", err?.message || String(err));
       setError("Failed to save profile. Please check your internet connection.");
@@ -811,10 +814,30 @@ export default function App() {
       console.log("App: Profile snapshot received, exists:", docSnap.exists());
       if (docSnap.exists()) {
         setBusinessProfile(docSnap.data() as BusinessProfile);
+        setProfileLoading(false);
       } else {
-        setBusinessProfile(null);
+        // Migration check: check "profiles" collection if "businesses" is empty
+        const oldProfileRef = doc(db, "profiles", user.uid);
+        getDoc(oldProfileRef).then(oldDocSnap => {
+          if (oldDocSnap.exists()) {
+            console.log("App: Found old profile, migrating...");
+            const oldData = oldDocSnap.data();
+            setBusinessProfile(oldData as BusinessProfile);
+            // Silently try to migrate to the new collection
+            setDoc(doc(db, "businesses", user.uid), {
+              ...oldData,
+              userId: user.uid,
+              updatedAt: serverTimestamp(),
+            }).catch(e => console.error("Migration failed:", e));
+          } else {
+            setBusinessProfile(null);
+          }
+          setProfileLoading(false);
+        }).catch(() => {
+          setBusinessProfile(null);
+          setProfileLoading(false);
+        });
       }
-      setProfileLoading(false);
     }, (error) => {
       handleFirestoreError(error, OperationType.GET, `businesses/${user.uid}`);
       setProfileLoading(false);
@@ -1453,14 +1476,12 @@ const SettingsView = React.memo(({ profile, user, t }: { profile: BusinessProfil
         logoUrl = await fileToBase64(photo);
       }
 
-      // Optimistic update
-      setDoc(doc(db, "businesses", user.uid), {
+      // Write to Firestore and wait for it to ensure persistence
+      await setDoc(doc(db, "businesses", user.uid), {
         ...formData,
         logoUrl,
         userId: user.uid,
         updatedAt: serverTimestamp(),
-      }).catch(err => {
-        console.error("Background profile update failed", err?.message || String(err));
       });
 
       setSaved(true);
