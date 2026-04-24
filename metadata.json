@@ -1,0 +1,5 @@
+{
+  "name": "Smart Installment Manager",
+  "description": "A production-ready installment management system with customer tracking, payment history, PDF receipts, and offline support.",
+  "requestFramePermissions": ["camera"]
+}
